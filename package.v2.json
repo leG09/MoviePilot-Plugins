@@ -1,0 +1,14 @@
+{
+  "QbOptimizer": {
+    "name": "QB种子优化",
+    "description": "优化qBittorrent种子管理：删除无人做种的种子重新下载、提高有人做种的下载优先级、清除下载时间过长的种子",
+    "labels": "下载管理,Qbittorrent",
+    "version": "1.0",
+    "icon": "Qbittorrent_A.png",
+    "author": "leGO9",
+    "level": 1,
+    "history": {
+      "v1.0": "已完成三个功能：无人做种、慢速下载、智能评分"
+    }
+  }
+}
