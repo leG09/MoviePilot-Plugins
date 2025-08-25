@@ -18,6 +18,7 @@
     "icon": "Linkease_A.png",
     "author": "leGO9",
     "level": 1,
+    "compatible": true,
     "history": {
       "v2.7.0": "新增网盘限制检测功能，支持自动检测网盘状态并智能轮询到可用目录"
     }
