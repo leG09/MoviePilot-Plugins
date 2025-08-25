@@ -88,6 +88,7 @@ class QbOptimizer(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         logger.info("【QB种子优化】开始初始化插件...")
+        logger.info(f"【QB种子优化】收到配置: {config}")
         
         if config:
             logger.info(f"【QB种子优化】收到配置: {config}")
@@ -117,6 +118,7 @@ class QbOptimizer(_PluginBase):
             
             # 综合评分配置
             self._enable_score_priority = config.get("enable_score_priority", True)
+            logger.info(f"【QB种子优化】配置加载 - enable_score_priority: {self._enable_score_priority} (原始配置值: {config.get('enable_score_priority', 'NOT_FOUND')})")
             self._speed_weight = float(config.get("speed_weight", 1.0))
             self._seeder_weight = float(config.get("seeder_weight", 0.5))
             self._min_score_threshold = float(config.get("min_score_threshold", 1.0))
@@ -1312,6 +1314,15 @@ class QbOptimizer(_PluginBase):
                         logger.debug(f"【功能4-磁盘监控】解析后的JSON数据: {response_data}")
                     except Exception as json_error:
                         logger.error(f"【功能4-磁盘监控】JSON解析失败: {str(json_error)}")
+                        return False
+                elif hasattr(response, 'text'):
+                    # 如果是HTTP响应对象但没有json方法，尝试解析文本
+                    try:
+                        import json
+                        response_data = json.loads(response.text)
+                        logger.debug(f"【功能4-磁盘监控】从文本解析的JSON数据: {response_data}")
+                    except Exception as json_error:
+                        logger.error(f"【功能4-磁盘监控】文本JSON解析失败: {str(json_error)}, 响应文本: {response.text}")
                         return False
                 else:
                     # 如果已经是字典，直接使用
