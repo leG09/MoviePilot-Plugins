@@ -244,19 +244,34 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         error_counts = {}
         
+        logger.debug(f"开始检查云盘错误，日志路径：{self._log_path}")
+        
         # 检查今天和昨天的日志文件
         for days_ago in range(2):
             date = datetime.date.today() - datetime.timedelta(days=days_ago)
             log_file = self._get_log_file_path(date)
             
-            if not log_file or not log_file.exists():
+            logger.debug(f"检查日志文件（{days_ago}天前）：{log_file}")
+            
+            if not log_file:
+                logger.debug("日志文件路径为空，跳过")
+                continue
+                
+            if not log_file.exists():
+                logger.debug(f"日志文件不存在：{log_file}")
                 continue
                 
             try:
+                file_size = log_file.stat().st_size
+                logger.debug(f"日志文件大小：{file_size} bytes")
+                
                 with open(log_file, 'r', encoding='utf-8') as f:
                     # 只读取最近的内容，避免处理过大的日志文件
-                    f.seek(max(0, log_file.stat().st_size - 1024 * 1024))  # 读取最后1MB
+                    start_pos = max(0, file_size - 1024 * 1024)  # 读取最后1MB
+                    f.seek(start_pos)
                     content = f.read()
+                    
+                logger.debug(f"读取了 {len(content)} 字符的日志内容")
                     
                 # 查找网盘限制错误
                 error_patterns = [
@@ -265,16 +280,22 @@ class GDCloudLinkMonitor(_PluginBase):
                     r'upload error for (/[^/]+)/.*403.*exceeded'
                 ]
                 
-                for pattern in error_patterns:
+                for i, pattern in enumerate(error_patterns):
                     matches = re.findall(pattern, content, re.IGNORECASE)
+                    logger.debug(f"模式 {i+1} 匹配到 {len(matches)} 个错误")
+                    
                     for mount_path in matches:
                         if mount_path not in error_counts:
                             error_counts[mount_path] = 0
                         error_counts[mount_path] += 1
+                        logger.debug(f"挂载路径 {mount_path} 错误计数增加到 {error_counts[mount_path]}")
                         
             except Exception as e:
                 logger.warning(f"检查日志文件 {log_file} 时出错: {e}")
-                
+                import traceback
+                logger.debug(f"错误详情: {traceback.format_exc()}")
+        
+        logger.info(f"日志检查完成，错误统计：{error_counts}")        
         return error_counts
 
     def _disable_destination(self, destination_path: str, reason: str = "网盘限制"):
@@ -321,18 +342,37 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         日志监控工作线程
         """
+        logger.info(f"日志监控线程开始运行，配置：启用={self._log_monitor_enabled}, 路径={self._log_path}, 间隔={self._log_check_interval}秒")
+        
         while not self._event.is_set():
             try:
-                if not self._log_monitor_enabled or not self._log_path:
+                if not self._log_monitor_enabled:
+                    logger.debug("日志监控未启用，跳过检查")
                     time.sleep(self._log_check_interval)
                     continue
+                
+                if not self._log_path:
+                    logger.debug("日志路径未配置，跳过检查")
+                    time.sleep(self._log_check_interval)
+                    continue
+                
+                logger.info(f"开始检查日志文件，路径：{self._log_path}")
                     
                 # 检查云盘错误
                 error_counts = self._check_cloud_errors()
                 
+                if error_counts:
+                    logger.info(f"检测到错误统计：{error_counts}")
+                else:
+                    logger.debug("未检测到网盘限制错误")
+                
                 # 处理错误超过阈值的挂载目录
                 for mount_path, count in error_counts.items():
+                    logger.info(f"挂载路径 {mount_path} 错误次数：{count}，阈值：{self._error_threshold}")
+                    
                     if count >= self._error_threshold:
+                        logger.warning(f"挂载路径 {mount_path} 错误次数达到阈值，开始禁用相关目录")
+                        
                         # 查找使用这个挂载路径的目标目录
                         for mon_path, destinations in self._dirconf.items():
                             if not destinations:
@@ -342,6 +382,7 @@ class GDCloudLinkMonitor(_PluginBase):
                                 dest_str = str(dest)
                                 if dest_str.startswith(mount_path):
                                     if not self._is_destination_disabled(dest_str):
+                                        logger.info(f"准备禁用目标目录：{dest_str}")
                                         self._disable_destination(dest_str, f"网盘限制错误达到阈值({count}次)")
                                         
                                         # 发送通知
@@ -351,11 +392,16 @@ class GDCloudLinkMonitor(_PluginBase):
                                                 text=f"检测到目标目录 {dest_str} 出现网盘限制错误 {count} 次，已自动禁用。",
                                                 mtype=NotificationType.Manual
                                             )
+                                    else:
+                                        logger.debug(f"目标目录 {dest_str} 已被禁用，跳过")
                 
+                logger.debug(f"日志检查完成，等待 {self._log_check_interval} 秒后下次检查")
                 time.sleep(self._log_check_interval)
                 
             except Exception as e:
                 logger.error(f"日志监控线程出错: {e}")
+                import traceback
+                logger.error(f"错误详情: {traceback.format_exc()}")
                 time.sleep(self._log_check_interval)
 
     def _recovery_worker(self):
@@ -393,8 +439,22 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         启动日志监控
         """
-        if not self._log_monitor_enabled or not self._log_path:
+        logger.info(f"准备启动日志监控，配置检查：启用={self._log_monitor_enabled}, 路径={self._log_path}")
+        
+        if not self._log_monitor_enabled:
+            logger.info("日志监控功能未启用")
             return
+            
+        if not self._log_path:
+            logger.warning("日志路径未配置，无法启动日志监控")
+            return
+            
+        # 检查日志路径是否存在
+        log_path = Path(self._log_path)
+        if not log_path.exists():
+            logger.warning(f"日志路径不存在：{self._log_path}")
+        else:
+            logger.info(f"日志路径验证成功：{self._log_path}")
             
         # 启动日志监控线程
         if not self._log_monitor_thread or not self._log_monitor_thread.is_alive():
