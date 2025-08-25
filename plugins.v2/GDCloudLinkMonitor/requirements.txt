@@ -1,0 +1,7 @@
+# GDCloudLinkMonitor Plugin Dependencies
+# 这个插件主要使用 MoviePilot 内置的模块，无需额外依赖
+# 如果需要额外的依赖，可以在这里添加
+
+# 示例：
+# requests>=2.25.1
+# beautifulsoup4>=4.9.3
