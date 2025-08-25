@@ -67,7 +67,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件版本
     plugin_version = "2.7.0" # 版本号提升，添加网盘限制检测功能
     # 插件作者
-    plugin_author = "leG09"
+    plugin_author = "leGO9"
     # 作者主页
     author_url = "https://github.com/leG09"
     # 插件配置项ID前缀
