@@ -3,7 +3,7 @@
     "name": "QB种子优化",
     "description": "优化qBittorrent种子管理：删除无人做种的种子重新下载、提高有人做种的下载优先级、清除下载时间过长的种子",
     "labels": "下载管理,Qbittorrent",
-    "version": "1.0",
+    "version": "1.1",
     "icon": "Qbittorrent_A.png",
     "author": "leGO9",
     "level": 1,
@@ -12,13 +12,14 @@
     }
   },"CloudLinkMonitor": {
     "name": "多目录实时监控",
-    "description": "监控云盘目录文件变化，自动转移媒体文件。",
+    "description": "监控云盘目录文件变化，自动转移媒体文件，支持轮询分发和网盘限制检测。",
     "labels": "云盘,工具",
-    "version": "2.6.3",
+    "version": "2.7.0",
     "icon": "Linkease_A.png",
     "author": "wonderful",
     "level": 1,
     "history": {
+      "v2.7.0": "新增网盘限制检测功能，支持自动检测网盘状态并智能轮询到可用目录",
       "v2.6.3": "恢复",
       "v2.6.1": "多目录",
       "v2.5.9": "增加定时任务执行",
