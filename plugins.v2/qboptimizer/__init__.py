@@ -84,6 +84,7 @@ class QbOptimizer(_PluginBase):
     _io_cache_threshold = 70         # 写入缓存阈值（百分比）
     _io_queue_threshold = 8000       # 队列I/O任务阈值
     _speed_limit_mbps = 1            # 限制下载速度（MB/s）
+    _is_speed_limited = False        # 当前是否已限速
 
     def init_plugin(self, config: dict = None):
         logger.info("【QB种子优化】开始初始化插件...")
@@ -126,6 +127,7 @@ class QbOptimizer(_PluginBase):
             self._io_cache_threshold = float(config.get("io_cache_threshold", 70))
             self._io_queue_threshold = int(config.get("io_queue_threshold", 8000))
             self._speed_limit_mbps = float(config.get("speed_limit_mbps", 1))
+            self._is_speed_limited = False  # 重置限速状态
             
             logger.info(f"【QB种子优化】配置加载完成:")
             logger.info(f"  - 启用状态: {self._enabled}")
@@ -1284,15 +1286,22 @@ class QbOptimizer(_PluginBase):
             
             # 调用qBittorrent API获取服务器状态
             try:
+                # 使用POST方法，包含rid参数
                 response = qb_client._request(
-                    http_method='GET',
+                    http_method='POST',
                     api_namespace='sync',
                     api_method='maindata',
                     data={'rid': 0}
                 )
                 
-                if not response or 'server_state' not in response:
-                    logger.error("【功能4-磁盘监控】无法获取服务器状态数据")
+                logger.debug(f"【功能4-磁盘监控】API响应: {response}")
+                
+                if not response:
+                    logger.error("【功能4-磁盘监控】API响应为空")
+                    return False
+                    
+                if 'server_state' not in response:
+                    logger.error(f"【功能4-磁盘监控】API响应中缺少server_state字段，响应内容: {response}")
                     return False
                 
                 server_state = response['server_state']
@@ -1317,8 +1326,11 @@ class QbOptimizer(_PluginBase):
                 logger.info(f"  - I/O缓存过高: {io_cache_high} ({write_cache_overload:.1f}% > {self._io_cache_threshold}%)")
                 logger.info(f"  - I/O队列过高: {io_queue_high} ({queued_io_jobs} > {self._io_queue_threshold})")
                 
-                # 如果满足任一条件，则限制下载速度
-                if disk_space_insufficient or (io_cache_high and io_queue_high):
+                # 判断是否需要限制或恢复速度
+                should_limit = disk_space_insufficient or (io_cache_high and io_queue_high)
+                
+                if should_limit and not self._is_speed_limited:
+                    # 需要限速且当前未限速
                     logger.warning(f"【功能4-磁盘监控】检测到系统资源不足，开始限制下载速度")
                     
                     # 限制下载速度
@@ -1326,6 +1338,7 @@ class QbOptimizer(_PluginBase):
                     success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
                     
                     if success:
+                        self._is_speed_limited = True  # 标记为已限速
                         logger.info(f"【功能4-磁盘监控】下载速度限制成功: {self._speed_limit_mbps}MB/s")
                         
                         # 发送通知
@@ -1351,7 +1364,46 @@ class QbOptimizer(_PluginBase):
                     else:
                         logger.error(f"【功能4-磁盘监控】下载速度限制失败")
                         return False
+                        
+                elif not should_limit and self._is_speed_limited:
+                    # 不需要限速但当前已限速，需要恢复
+                    logger.info(f"【功能4-磁盘监控】系统资源已恢复正常，开始恢复下载速度")
+                    
+                    # 恢复下载速度（设置为0表示无限制）
+                    success = self._set_download_speed_limit(downloader_obj, 0)
+                    
+                    if success:
+                        self._is_speed_limited = False  # 标记为未限速
+                        logger.info(f"【功能4-磁盘监控】下载速度恢复成功，已取消限制")
+                        
+                        # 发送通知
+                        if self._notify:
+                            notification_title = "【QB种子优化】系统资源已恢复，已取消下载速度限制"
+                            notification_text = f"系统资源已恢复正常:\n"
+                            notification_text += f"• 磁盘剩余空间: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB) ✓\n"
+                            notification_text += f"• I/O缓存使用率: {write_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%) ✓\n"
+                            notification_text += f"• 队列I/O任务: {queued_io_jobs} (阈值: {self._io_queue_threshold}) ✓\n"
+                            notification_text += f"\n已自动取消下载速度限制"
+                            
+                            self.post_message(
+                                mtype=NotificationType.Manual,
+                                title=notification_title,
+                                text=notification_text
+                            )
+                            logger.info(f"【功能4-磁盘监控】已发送资源恢复通知")
+                        
+                        return True
+                    else:
+                        logger.error(f"【功能4-磁盘监控】下载速度恢复失败")
+                        return False
+                        
+                elif should_limit and self._is_speed_limited:
+                    # 需要限速且当前已限速，无需操作
+                    logger.info(f"【功能4-磁盘监控】系统资源仍不足，已处于限速状态，无需操作")
+                    return True
+                    
                 else:
+                    # 不需要限速且当前未限速，无需操作
                     logger.info(f"【功能4-磁盘监控】系统资源正常，无需限制下载速度")
                     return False
                     
@@ -1383,6 +1435,8 @@ class QbOptimizer(_PluginBase):
                         api_method='setDownloadSpeedLimit',
                         data={'limit': speed_limit_bytes}
                     )
+                    
+                    logger.debug(f"【功能4-磁盘监控】速度限制API响应: {response}")
                     
                     logger.info(f"【功能4-磁盘监控】qBittorrent速度限制设置成功")
                     return True
