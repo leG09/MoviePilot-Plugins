@@ -77,6 +77,13 @@ class QbOptimizer(_PluginBase):
     _speed_weight = 1.0             # 下载速度权重
     _seeder_weight = 0.5            # 做种数权重
     _min_score_threshold = 1.0      # 最低综合评分阈值
+    
+    # 磁盘空间和I/O监控配置
+    _enable_disk_monitor = False     # 启用磁盘空间和I/O监控
+    _disk_space_threshold = 10       # 磁盘空间不足阈值（GB）
+    _io_cache_threshold = 70         # 写入缓存阈值（百分比）
+    _io_queue_threshold = 8000       # 队列I/O任务阈值
+    _speed_limit_mbps = 1            # 限制下载速度（MB/s）
 
     def init_plugin(self, config: dict = None):
         logger.info("【QB种子优化】开始初始化插件...")
@@ -113,6 +120,13 @@ class QbOptimizer(_PluginBase):
             self._seeder_weight = float(config.get("seeder_weight", 0.5))
             self._min_score_threshold = float(config.get("min_score_threshold", 1.0))
             
+            # 磁盘空间和I/O监控配置
+            self._enable_disk_monitor = config.get("enable_disk_monitor", False)
+            self._disk_space_threshold = float(config.get("disk_space_threshold", 10))
+            self._io_cache_threshold = float(config.get("io_cache_threshold", 70))
+            self._io_queue_threshold = int(config.get("io_queue_threshold", 8000))
+            self._speed_limit_mbps = float(config.get("speed_limit_mbps", 1))
+            
             logger.info(f"【QB种子优化】配置加载完成:")
             logger.info(f"  - 启用状态: {self._enabled}")
             logger.info(f"  - 立即运行: {self._onlyonce}")
@@ -133,6 +147,11 @@ class QbOptimizer(_PluginBase):
             logger.info(f"  - 速度权重: {self._speed_weight}")
             logger.info(f"  - 做种数权重: {self._seeder_weight}")
             logger.info(f"  - 最低评分阈值: {self._min_score_threshold}")
+            logger.info(f"  - 磁盘监控开关: {self._enable_disk_monitor}")
+            logger.info(f"  - 磁盘空间阈值: {self._disk_space_threshold}GB")
+            logger.info(f"  - I/O缓存阈值: {self._io_cache_threshold}%")
+            logger.info(f"  - I/O队列阈值: {self._io_queue_threshold}")
+            logger.info(f"  - 速度限制: {self._speed_limit_mbps}MB/s")
         else:
             logger.warning("【QB种子优化】未收到配置，使用默认值")
 
@@ -179,6 +198,12 @@ class QbOptimizer(_PluginBase):
                     "speed_weight": self._speed_weight,
                     "seeder_weight": self._seeder_weight,
                     "min_score_threshold": self._min_score_threshold,
+                    # 磁盘空间和I/O监控配置
+                    "enable_disk_monitor": self._enable_disk_monitor,
+                    "disk_space_threshold": self._disk_space_threshold,
+                    "io_cache_threshold": self._io_cache_threshold,
+                    "io_queue_threshold": self._io_queue_threshold,
+                    "speed_limit_mbps": self._speed_limit_mbps,
                 }
                 logger.info(f"【QB种子优化】保存配置: {config_to_save}")
                 self.update_config(config_to_save)
@@ -383,6 +408,9 @@ class QbOptimizer(_PluginBase):
                     priority_boosted = self._boost_priority_torrents(downloader_obj, all_torrents, downloader_name)
                     timeout_removed, timeout_failed = self._clean_timeout_torrents(downloader_obj, all_torrents, downloader_name)
                     
+                    # 执行磁盘空间和I/O监控
+                    disk_monitor_result = self._monitor_disk_and_io(downloader_obj, downloader_name)
+                    
                     total_zero_seed_removed += zero_seed_removed
                     total_priority_boosted += priority_boosted
                     total_timeout_removed += timeout_removed
@@ -438,11 +466,11 @@ class QbOptimizer(_PluginBase):
                         summary_message += f"   原因: {failed_torrent['reason']}\n\n"
                     
                     logger.info(f"【QB种子优化】发送总结通知: 清理{total_zero_seed_removed + total_timeout_removed}个，失败{len(all_failed_torrents)}个")
-                self.post_message(
-                    mtype=NotificationType.Manual,
-                    title=f"【QB种子优化】清理完成 - {len(all_failed_torrents)}个种子未找到资源",
-                    text=summary_message
-                )
+                    self.post_message(
+                        mtype=NotificationType.Manual,
+                        title=f"【QB种子优化】清理完成 - {len(all_failed_torrents)}个种子未找到资源",
+                        text=summary_message
+                    )
             else:
                 logger.info(f"【QB种子优化】重新下载成功总结: 清理的{total_zero_seed_removed + total_timeout_removed}个种子全部重新下载成功")
                 if self._notify:
@@ -1236,6 +1264,139 @@ class QbOptimizer(_PluginBase):
                 logger.warning(f"     - 原因: {failed_torrent['reason']}")
         
         return len(timeout_torrents), redownload_failed_torrents
+
+    def _monitor_disk_and_io(self, downloader_obj, downloader_name):
+        """
+        监控磁盘空间和I/O状态，在条件满足时限制下载速度
+        """
+        logger.info(f"【功能4-磁盘监控】开始磁盘空间和I/O监控，功能开关: {self._enable_disk_monitor}")
+        
+        if not self._enable_disk_monitor:
+            logger.info("【功能4-磁盘监控】磁盘空间和I/O监控功能已禁用，跳过")
+            return False
+            
+        try:
+            # 获取qBittorrent客户端实例
+            qb_client = downloader_obj.qbc
+            if not qb_client:
+                logger.error("【功能4-磁盘监控】无法获取qBittorrent客户端")
+                return False
+            
+            # 调用qBittorrent API获取服务器状态
+            try:
+                response = qb_client._request(
+                    http_method='GET',
+                    api_namespace='sync',
+                    api_method='maindata',
+                    data={'rid': 0}
+                )
+                
+                if not response or 'server_state' not in response:
+                    logger.error("【功能4-磁盘监控】无法获取服务器状态数据")
+                    return False
+                
+                server_state = response['server_state']
+                
+                # 获取各项指标
+                free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
+                write_cache_overload = server_state.get('write_cache_overload', 0)  # 百分比
+                queued_io_jobs = server_state.get('queued_io_jobs', 0)  # I/O任务数
+                
+                logger.info(f"【功能4-磁盘监控】服务器状态:")
+                logger.info(f"  - 磁盘剩余空间: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB)")
+                logger.info(f"  - 写入缓存过载: {write_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)")
+                logger.info(f"  - 队列I/O任务: {queued_io_jobs} (阈值: {self._io_queue_threshold})")
+                
+                # 判断是否需要限制速度
+                disk_space_insufficient = free_space_gb < self._disk_space_threshold
+                io_cache_high = write_cache_overload > self._io_cache_threshold
+                io_queue_high = queued_io_jobs > self._io_queue_threshold
+                
+                logger.info(f"【功能4-磁盘监控】检查结果:")
+                logger.info(f"  - 磁盘空间不足: {disk_space_insufficient} ({free_space_gb:.2f}GB < {self._disk_space_threshold}GB)")
+                logger.info(f"  - I/O缓存过高: {io_cache_high} ({write_cache_overload:.1f}% > {self._io_cache_threshold}%)")
+                logger.info(f"  - I/O队列过高: {io_queue_high} ({queued_io_jobs} > {self._io_queue_threshold})")
+                
+                # 如果满足任一条件，则限制下载速度
+                if disk_space_insufficient or (io_cache_high and io_queue_high):
+                    logger.warning(f"【功能4-磁盘监控】检测到系统资源不足，开始限制下载速度")
+                    
+                    # 限制下载速度
+                    speed_limit_bytes = int(self._speed_limit_mbps * 1024 * 1024)  # 转换为字节/秒
+                    success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
+                    
+                    if success:
+                        logger.info(f"【功能4-磁盘监控】下载速度限制成功: {self._speed_limit_mbps}MB/s")
+                        
+                        # 发送通知
+                        if self._notify:
+                            notification_title = "【QB种子优化】系统资源不足，已限制下载速度"
+                            notification_text = f"检测到以下问题:\n"
+                            if disk_space_insufficient:
+                                notification_text += f"• 磁盘空间不足: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB)\n"
+                            if io_cache_high:
+                                notification_text += f"• I/O缓存使用率过高: {write_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)\n"
+                            if io_queue_high:
+                                notification_text += f"• 队列I/O任务过多: {queued_io_jobs} (阈值: {self._io_queue_threshold})\n"
+                            notification_text += f"\n已自动限制下载速度为: {self._speed_limit_mbps}MB/s"
+                            
+                            self.post_message(
+                                mtype=NotificationType.Manual,
+                                title=notification_title,
+                                text=notification_text
+                            )
+                            logger.info(f"【功能4-磁盘监控】已发送资源不足通知")
+                        
+                        return True
+                    else:
+                        logger.error(f"【功能4-磁盘监控】下载速度限制失败")
+                        return False
+                else:
+                    logger.info(f"【功能4-磁盘监控】系统资源正常，无需限制下载速度")
+                    return False
+                    
+            except Exception as api_error:
+                logger.error(f"【功能4-磁盘监控】qBittorrent API调用失败: {str(api_error)}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"【功能4-磁盘监控】监控过程中发生异常: {str(e)}")
+            import traceback
+            logger.error(f"【功能4-磁盘监控】异常详情: {traceback.format_exc()}")
+            return False
+
+    def _set_download_speed_limit(self, downloader_obj, speed_limit_bytes):
+        """
+        设置下载器速度限制
+        """
+        try:
+            logger.info(f"【功能4-磁盘监控】设置下载速度限制: {speed_limit_bytes} bytes/s ({speed_limit_bytes/(1024*1024):.1f}MB/s)")
+            
+            # 尝试使用qBittorrent API设置速度限制
+            qb_client = downloader_obj.qbc
+            if qb_client:
+                try:
+                    # 设置下载速度限制
+                    response = qb_client._request(
+                        http_method='POST',
+                        api_namespace='transfer',
+                        api_method='setDownloadSpeedLimit',
+                        data={'limit': speed_limit_bytes}
+                    )
+                    
+                    logger.info(f"【功能4-磁盘监控】qBittorrent速度限制设置成功")
+                    return True
+                    
+                except Exception as api_error:
+                    logger.error(f"【功能4-磁盘监控】qBittorrent API设置速度限制失败: {str(api_error)}")
+                    return False
+            else:
+                logger.error("【功能4-磁盘监控】无法获取qBittorrent客户端")
+                return False
+                
+        except Exception as e:
+            logger.error(f"【功能4-磁盘监控】设置下载速度限制失败: {str(e)}")
+            return False
 
     def _re_download_torrent(self, torrent_info):
         """
@@ -2084,6 +2245,126 @@ class QbOptimizer(_PluginBase):
                         ]
                     },
                     
+                    # 磁盘空间和I/O监控配置组
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VDivider',
+                                        'props': {
+                                            'text': '磁盘空间和I/O监控'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'enable_disk_monitor',
+                                            'label': '启用磁盘监控',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'disk_space_threshold',
+                                            'label': '磁盘空间阈值（GB）',
+                                            'placeholder': '10',
+                                            'type': 'number'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'speed_limit_mbps',
+                                            'label': '限制下载速度（MB/s）',
+                                            'placeholder': '1',
+                                            'type': 'number',
+                                            'step': 0.1
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'io_cache_threshold',
+                                            'label': 'I/O缓存阈值（%）',
+                                            'placeholder': '70',
+                                            'type': 'number'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'io_queue_threshold',
+                                            'label': 'I/O队列阈值',
+                                            'placeholder': '8000',
+                                            'type': 'number'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    
                     # 其他配置组
                     {
                         'component': 'VRow',
@@ -2221,6 +2502,12 @@ class QbOptimizer(_PluginBase):
             "speed_weight": 1.0,
             "seeder_weight": 0.5,
             "min_score_threshold": 1.0,
+            # 磁盘空间和I/O监控配置
+            "enable_disk_monitor": False,
+            "disk_space_threshold": 10,
+            "io_cache_threshold": 70,
+            "io_queue_threshold": 8000,
+            "speed_limit_mbps": 1,
         }
 
     def get_page(self) -> List[dict]:
