@@ -1457,34 +1457,34 @@ class QbOptimizer(_PluginBase):
         设置下载器速度限制
         """
         try:
-            logger.info(f"【功能4-磁盘监控】设置下载速度限制: {speed_limit_bytes} bytes/s ({speed_limit_bytes/(1024*1024):.1f}MB/s)")
+            speed_limit_kbps = int(speed_limit_bytes / 1024)  # 转换为KB/s
+            logger.info(f"【功能4-磁盘监控】设置下载速度限制: {speed_limit_bytes} bytes/s ({speed_limit_kbps}KB/s)")
             
-            # 尝试使用qBittorrent API设置速度限制
-            qb_client = downloader_obj.qbc
-            if qb_client:
-                try:
-                    # 设置下载速度限制
-                    response = qb_client._request(
-                        http_method='POST',
-                        api_namespace='transfer',
-                        api_method='setDownloadSpeedLimit',
-                        data={'limit': speed_limit_bytes}
-                    )
-                    
-                    logger.debug(f"【功能4-磁盘监控】速度限制API响应: {response}")
-                    
-                    logger.info(f"【功能4-磁盘监控】qBittorrent速度限制设置成功")
-                    return True
-                    
-                except Exception as api_error:
-                    logger.error(f"【功能4-磁盘监控】qBittorrent API设置速度限制失败: {str(api_error)}")
-                    return False
+            # 获取当前的上传速度限制
+            try:
+                current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
+                logger.debug(f"【功能4-磁盘监控】当前速度限制 - 下载: {current_download_limit}KB/s, 上传: {current_upload_limit}KB/s")
+            except Exception as e:
+                logger.warning(f"【功能4-磁盘监控】获取当前速度限制失败: {str(e)}")
+                current_download_limit, current_upload_limit = 0, 0
+            
+            # 使用下载器的set_speed_limit方法设置速度限制
+            success = downloader_obj.set_speed_limit(
+                download_limit=speed_limit_kbps,
+                upload_limit=current_upload_limit
+            )
+            
+            if success:
+                logger.info(f"【功能4-磁盘监控】下载速度限制设置成功: {speed_limit_kbps}KB/s")
+                return True
             else:
-                logger.error("【功能4-磁盘监控】无法获取qBittorrent客户端")
+                logger.error(f"【功能4-磁盘监控】下载速度限制设置失败")
                 return False
                 
         except Exception as e:
             logger.error(f"【功能4-磁盘监控】设置下载速度限制失败: {str(e)}")
+            import traceback
+            logger.error(f"【功能4-磁盘监控】设置速度限制异常详情: {traceback.format_exc()}")
             return False
 
     def _re_download_torrent(self, torrent_info):
