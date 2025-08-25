@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import traceback
+import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -65,11 +66,11 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.7.0" # 版本号提升，添加网盘限制检测功能
+    plugin_version = "2.8.0" # 版本号提升，添加网盘限制检测功能
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
-    author_url = "https://github.com/leGO9"
+    author_url = "https://github.com/leG09"
     # 插件配置项ID前缀
     plugin_config_prefix = "gd_cloudlinkmonitor_"
     # 加载顺序
@@ -115,15 +116,18 @@ class GDCloudLinkMonitor(_PluginBase):
     _transferconf: Dict[str, Optional[str]] = {}
     _overwrite_mode: Dict[str, Optional[str]] = {}
     _medias = {}
-    # 网盘限制检测相关
-    _enable_cloud_check = False
-    _cloud_cli_path = ""
-    _test_file_path = ""
-    _cloud_check_interval = 300  # 检测间隔，默认5分钟
-    _last_check_time: Dict[str, float] = {}  # 记录每个目录的最后检测时间
-    _cloud_status: Dict[str, bool] = {}  # 记录每个目录的网盘状态，True表示正常，False表示被限制
     # 退出事件
     _event = threading.Event()
+    
+    # 日志监控相关属性
+    _log_monitor_enabled = False
+    _log_path = ""
+    _log_check_interval = 60  # 检查间隔(秒)
+    _error_threshold = 3  # 错误阈值
+    _recovery_check_interval = 1800  # 恢复检查间隔(30分钟)
+    _disabled_destinations: Dict[str, Dict[str, Any]] = {}  # 被禁用的目标目录
+    _log_monitor_thread = None
+    _recovery_thread = None
 
     def _save_state_to_file(self):
         """将轮询状态保存到文件"""
@@ -156,15 +160,22 @@ class GDCloudLinkMonitor(_PluginBase):
         根据媒体信息和轮询策略选择一个目标目录。
         1. 检查此媒体(TMDB ID)是否已有历史记录，如果有，则使用同一目录以保持一致性。
         2. 如果没有历史记录，则使用轮询算法选择一个新目录。
+        3. 排除被禁用的目标目录。
         """
-        destinations = self._dirconf.get(mon_path)
-        if not destinations:
+        all_destinations = self._dirconf.get(mon_path)
+        if not all_destinations:
             logger.error(f"监控源 {mon_path} 未配置目标目录")
             return None
 
-        # 如果只有一个目标目录，则无需负载均衡
-        if len(destinations) == 1:
-            return destinations[0]
+        # 获取可用的目标目录（排除被禁用的）
+        available_destinations = self._get_available_destinations(mon_path)
+        if not available_destinations:
+            logger.error(f"监控源 {mon_path} 没有可用的目标目录（所有目录都已被禁用）")
+            return None
+
+        # 如果只有一个可用目标目录，则无需负载均衡
+        if len(available_destinations) == 1:
+            return available_destinations[0]
 
         # 1. 检查历史记录以确保同一剧集/电影系列保持在同一目录
         history_entry = self.transferhis.get_by_type_tmdbid(
@@ -173,7 +184,7 @@ class GDCloudLinkMonitor(_PluginBase):
         )
         if history_entry and history_entry.dest:
             historical_dest_path = Path(history_entry.dest)
-            for dest in destinations:
+            for dest in available_destinations:
                 try:
                     if historical_dest_path.is_relative_to(dest):
                         logger.info(f"为 '{mediainfo.title_year}' 找到了已存在的转移记录，将使用一致的目标目录: {dest}")
@@ -183,133 +194,219 @@ class GDCloudLinkMonitor(_PluginBase):
 
         # 2. 没有找到历史记录, 使用轮询(Round-Robin)算法
         logger.info(f"首次转移 '{mediainfo.title_year}'，将通过轮询方式选择新目录。")
-        last_index = self._round_robin_index.get(mon_path, -1)
-        next_index = (last_index + 1) % len(destinations)
         
-        # 为下次运行保存新的索引
-        self._round_robin_index[mon_path] = next_index
+        # 使用可用目录进行轮询
+        last_index = self._round_robin_index.get(mon_path, -1)
+        
+        # 找到上次选择的目录在可用目录列表中的位置
+        last_dest = None
+        if last_index >= 0 and last_index < len(all_destinations):
+            last_dest = all_destinations[last_index]
+            
+        # 在可用目录中找到下一个目录
+        if last_dest and last_dest in available_destinations:
+            last_available_index = available_destinations.index(last_dest)
+            next_available_index = (last_available_index + 1) % len(available_destinations)
+        else:
+            # 如果上次的目录不在可用列表中，从第一个开始
+            next_available_index = 0
+            
+        chosen_dest = available_destinations[next_available_index]
+        
+        # 更新全局索引为选择的目录在所有目录中的位置
+        chosen_global_index = all_destinations.index(chosen_dest)
+        self._round_robin_index[mon_path] = chosen_global_index
+        
         # 将新状态持久化到文件
         self._save_state_to_file()
 
-        chosen_dest = destinations[next_index]
-        logger.info(f"针对 '{mon_path}' 的轮询机制选择了索引 {next_index}: {chosen_dest}")
+        logger.info(f"针对 '{mon_path}' 的轮询机制选择了可用目录: {chosen_dest}")
 
         return chosen_dest
 
-    def _check_cloud_drive_status(self, target_path: Path) -> bool:
+    def _get_log_file_path(self, date: datetime.date = None) -> Path:
         """
-        检测网盘状态，通过上传测试文件来判断是否被限制
-        :param target_path: 目标路径
-        :return: True表示正常，False表示被限制
+        根据日期获取日志文件路径
         """
-        if not self._enable_cloud_check or not self._cloud_cli_path or not self._test_file_path:
-            return True
-        
-        # 检查检测间隔
-        current_time = datetime.datetime.now().timestamp()
-        last_check = self._last_check_time.get(str(target_path), 0)
-        if current_time - last_check < self._cloud_check_interval:
-            # 使用缓存的状态
-            return self._cloud_status.get(str(target_path), True)
-        
-        try:
-            # 构建clouddrive-cli命令
-            cmd = [
-                self._cloud_cli_path,
-                "-command=upload",
-                f"-file={self._test_file_path}",
-                f"-path={str(target_path)}/"
-            ]
-            
-            logger.info(f"检测网盘状态: {' '.join(cmd)}")
-            
-            # 执行命令
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            # 更新检测时间
-            self._last_check_time[str(target_path)] = current_time
-            
-            if result.returncode == 0 and "文件上传完成" in result.stdout:
-                # 上传成功，网盘正常
-                self._cloud_status[str(target_path)] = True
-                logger.info(f"网盘 {target_path} 状态正常")
-                return True
-            else:
-                # 上传失败，网盘被限制
-                self._cloud_status[str(target_path)] = False
-                logger.warn(f"网盘 {target_path} 被限制，错误信息: {result.stderr}")
-                return False
-                
-        except subprocess.TimeoutExpired:
-            logger.error(f"检测网盘 {target_path} 状态超时")
-            self._cloud_status[str(target_path)] = False
-            return False
-        except Exception as e:
-            logger.error(f"检测网盘 {target_path} 状态异常: {str(e)}")
-            self._cloud_status[str(target_path)] = False
-            return False
-
-    def _get_available_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
-        """
-        获取可用的目标目录，优先选择未被限制的网盘
-        :param mon_path: 监控目录
-        :param mediainfo: 媒体信息
-        :return: 可用的目标目录
-        """
-        destinations = self._dirconf.get(mon_path)
-        if not destinations:
-            logger.error(f"监控源 {mon_path} 未配置目标目录")
+        if not self._log_path:
             return None
-
-        # 如果只有一个目标目录，直接返回
-        if len(destinations) == 1:
-            if self._check_cloud_drive_status(destinations[0]):
-                return destinations[0]
-            else:
-                logger.error(f"唯一目标目录 {destinations[0]} 被限制，无法转移文件")
-                return None
-
-        # 检查历史记录以确保同一剧集/电影系列保持在同一目录
-        history_entry = self.transferhis.get_by_type_tmdbid(
-            mtype=mediainfo.type.value,
-            tmdbid=mediainfo.tmdb_id
-        )
-        if history_entry and history_entry.dest:
-            historical_dest_path = Path(history_entry.dest)
-            for dest in destinations:
-                try:
-                    if historical_dest_path.is_relative_to(dest):
-                        if self._check_cloud_drive_status(dest):
-                            logger.info(f"为 '{mediainfo.title_year}' 找到了已存在的转移记录，将使用一致的目标目录: {dest}")
-                            return dest
-                        else:
-                            logger.warn(f"历史记录的目标目录 {dest} 被限制，将选择其他可用目录")
-                except ValueError:
-                    continue
-
-        # 轮询选择可用的目标目录
-        last_index = self._round_robin_index.get(mon_path, -1)
-        checked_count = 0
         
-        while checked_count < len(destinations):
-            next_index = (last_index + 1) % len(destinations)
-            dest = destinations[next_index]
+        if date is None:
+            date = datetime.date.today()
             
-            if self._check_cloud_drive_status(dest):
-                # 找到可用的目录
-                self._round_robin_index[mon_path] = next_index
-                self._save_state_to_file()
-                logger.info(f"针对 '{mon_path}' 的轮询机制选择了索引 {next_index}: {dest}")
-                return dest
-            else:
-                # 当前目录被限制，继续检查下一个
-                logger.warn(f"目标目录 {dest} 被限制，尝试下一个目录")
-                last_index = next_index
-                checked_count += 1
+        log_filename = f"{date.strftime('%Y-%m-%d')}.log"
+        return Path(self._log_path) / log_filename
+
+    def _check_cloud_errors(self) -> Dict[str, int]:
+        """
+        检查日志文件中的云盘错误
+        返回每个挂载目录的错误计数
+        """
+        error_counts = {}
         
-        # 所有目录都被限制
-        logger.error(f"所有目标目录都被限制，无法转移文件")
-        return None
+        # 检查今天和昨天的日志文件
+        for days_ago in range(2):
+            date = datetime.date.today() - datetime.timedelta(days=days_ago)
+            log_file = self._get_log_file_path(date)
+            
+            if not log_file or not log_file.exists():
+                continue
+                
+            try:
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    # 只读取最近的内容，避免处理过大的日志文件
+                    f.seek(max(0, log_file.stat().st_size - 1024 * 1024))  # 读取最后1MB
+                    content = f.read()
+                    
+                # 查找网盘限制错误
+                error_patterns = [
+                    r'upload error for (/[^/]+)/.*User rate limit exceeded',
+                    r'upload error for (/[^/]+)/.*quota.*exceeded',
+                    r'upload error for (/[^/]+)/.*403.*exceeded'
+                ]
+                
+                for pattern in error_patterns:
+                    matches = re.findall(pattern, content, re.IGNORECASE)
+                    for mount_path in matches:
+                        if mount_path not in error_counts:
+                            error_counts[mount_path] = 0
+                        error_counts[mount_path] += 1
+                        
+            except Exception as e:
+                logger.warning(f"检查日志文件 {log_file} 时出错: {e}")
+                
+        return error_counts
+
+    def _disable_destination(self, destination_path: str, reason: str = "网盘限制"):
+        """
+        禁用一个目标目录
+        """
+        self._disabled_destinations[destination_path] = {
+            'reason': reason,
+            'disabled_time': datetime.datetime.now(),
+            'error_count': self._disabled_destinations.get(destination_path, {}).get('error_count', 0) + 1
+        }
+        logger.warning(f"已禁用目标目录 {destination_path}，原因：{reason}")
+
+    def _enable_destination(self, destination_path: str):
+        """
+        重新启用一个目标目录
+        """
+        if destination_path in self._disabled_destinations:
+            del self._disabled_destinations[destination_path]
+            logger.info(f"已重新启用目标目录 {destination_path}")
+
+    def _is_destination_disabled(self, destination_path: str) -> bool:
+        """
+        检查目标目录是否被禁用
+        """
+        return destination_path in self._disabled_destinations
+
+    def _get_available_destinations(self, mon_path: str) -> List[Path]:
+        """
+        获取可用的目标目录（排除被禁用的）
+        """
+        all_destinations = self._dirconf.get(mon_path, [])
+        if not all_destinations:
+            return []
+            
+        available_destinations = []
+        for dest in all_destinations:
+            if not self._is_destination_disabled(str(dest)):
+                available_destinations.append(dest)
+                
+        return available_destinations
+
+    def _log_monitor_worker(self):
+        """
+        日志监控工作线程
+        """
+        while not self._event.is_set():
+            try:
+                if not self._log_monitor_enabled or not self._log_path:
+                    time.sleep(self._log_check_interval)
+                    continue
+                    
+                # 检查云盘错误
+                error_counts = self._check_cloud_errors()
+                
+                # 处理错误超过阈值的挂载目录
+                for mount_path, count in error_counts.items():
+                    if count >= self._error_threshold:
+                        # 查找使用这个挂载路径的目标目录
+                        for mon_path, destinations in self._dirconf.items():
+                            if not destinations:
+                                continue
+                                
+                            for dest in destinations:
+                                dest_str = str(dest)
+                                if dest_str.startswith(mount_path):
+                                    if not self._is_destination_disabled(dest_str):
+                                        self._disable_destination(dest_str, f"网盘限制错误达到阈值({count}次)")
+                                        
+                                        # 发送通知
+                                        if self._notify:
+                                            self.post_message(
+                                                title="网盘限制检测",
+                                                text=f"检测到目标目录 {dest_str} 出现网盘限制错误 {count} 次，已自动禁用。",
+                                                mtype=NotificationType.Manual
+                                            )
+                
+                time.sleep(self._log_check_interval)
+                
+            except Exception as e:
+                logger.error(f"日志监控线程出错: {e}")
+                time.sleep(self._log_check_interval)
+
+    def _recovery_worker(self):
+        """
+        恢复检查工作线程
+        """
+        while not self._event.is_set():
+            try:
+                current_time = datetime.datetime.now()
+                
+                # 检查被禁用的目录是否可以恢复
+                for dest_path, info in list(self._disabled_destinations.items()):
+                    disabled_time = info['disabled_time']
+                    time_diff = (current_time - disabled_time).total_seconds()
+                    
+                    # 如果禁用时间超过恢复检查间隔，尝试恢复
+                    if time_diff > self._recovery_check_interval:
+                        # 简单的恢复策略：超过恢复间隔就重新启用
+                        self._enable_destination(dest_path)
+                        
+                        if self._notify:
+                            self.post_message(
+                                title="目标目录恢复",
+                                text=f"目标目录 {dest_path} 已重新启用。",
+                                mtype=NotificationType.Manual
+                            )
+                
+                time.sleep(self._recovery_check_interval)
+                
+            except Exception as e:
+                logger.error(f"恢复检查线程出错: {e}")
+                time.sleep(self._recovery_check_interval)
+
+    def _start_log_monitoring(self):
+        """
+        启动日志监控
+        """
+        if not self._log_monitor_enabled or not self._log_path:
+            return
+            
+        # 启动日志监控线程
+        if not self._log_monitor_thread or not self._log_monitor_thread.is_alive():
+            self._log_monitor_thread = threading.Thread(target=self._log_monitor_worker, daemon=True)
+            self._log_monitor_thread.start()
+            logger.info("日志监控线程已启动")
+            
+        # 启动恢复检查线程
+        if not self._recovery_thread or not self._recovery_thread.is_alive():
+            self._recovery_thread = threading.Thread(target=self._recovery_worker, daemon=True)
+            self._recovery_thread.start()
+            logger.info("恢复检查线程已启动")
 
     def init_plugin(self, config: dict = None):
         self.transferhis = TransferHistoryOper()
@@ -321,7 +418,7 @@ class GDCloudLinkMonitor(_PluginBase):
         self.filetransfer = FileManagerModule()
         
         # 初始化状态文件路径
-        self._state_file = self.get_data_path() / "gd_cloudlinkmonitor_state.json"
+        self._state_file = self.get_data_path() / "cloudlinkmonitor_state.json"
         
         # 清空配置并在启动时从文件加载状态
         self._dirconf = {}
@@ -347,11 +444,13 @@ class GDCloudLinkMonitor(_PluginBase):
             self._size = config.get("size") or 0
             self._softlink = config.get("softlink")
             self._strm = config.get("strm")
-            # 网盘限制检测配置
-            self._enable_cloud_check = config.get("enable_cloud_check")
-            self._cloud_cli_path = config.get("cloud_cli_path") or ""
-            self._test_file_path = config.get("test_file_path") or ""
-            self._cloud_check_interval = config.get("cloud_check_interval") or 300
+            
+            # 日志监控相关配置
+            self._log_monitor_enabled = config.get("log_monitor_enabled", False)
+            self._log_path = config.get("log_path", "")
+            self._log_check_interval = config.get("log_check_interval", 60)
+            self._error_threshold = config.get("error_threshold", 3)
+            self._recovery_check_interval = config.get("recovery_check_interval", 1800)
 
         # 停止现有任务
         self.stop_service()
@@ -456,6 +555,9 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._onlyonce = False
                 self.__update_config()
 
+            # 启动日志监控
+            self._start_log_monitoring()
+
             # 启动定时服务
             if self._scheduler.get_jobs():
                 self._scheduler.print_jobs()
@@ -491,11 +593,11 @@ class GDCloudLinkMonitor(_PluginBase):
             "category": self._category,
             "size": self._size,
             "refresh": self._refresh,
-            # 网盘限制检测配置
-            "enable_cloud_check": self._enable_cloud_check,
-            "cloud_cli_path": self._cloud_cli_path,
-            "test_file_path": self._test_file_path,
-            "cloud_check_interval": self._cloud_check_interval,
+            "log_monitor_enabled": self._log_monitor_enabled,
+            "log_path": self._log_path,
+            "log_check_interval": self._log_check_interval,
+            "error_threshold": self._error_threshold,
+            "recovery_check_interval": self._recovery_check_interval,
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -645,10 +747,10 @@ class GDCloudLinkMonitor(_PluginBase):
                         mediainfo.title = transfer_history.title
                 logger.info(f"{file_path.name} 识别为：{mediainfo.type.value} {mediainfo.title_year}")
                 
-                # 使用新的网盘检测逻辑查询转移目的目录
-                target: Path = self._get_available_destination(mon_path=mon_path, mediainfo=mediainfo)
+                # 使用新的轮询逻辑查询转移目的目录
+                target: Path = self._get_round_robin_destination(mon_path=mon_path, mediainfo=mediainfo)
                 if not target:
-                    logger.error(f"无法为 '{file_path.name}' 确定可用的目标目录，已跳过。")
+                    logger.error(f"无法为 '{file_path.name}' 确定目标目录，已跳过。")
                     return
 
                 # 查询转移方式
@@ -911,7 +1013,7 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         if self._enabled and self._cron:
             return [{
-                "id": "GDCloudLinkMonitor",
+                "id": "CloudLinkMonitor",
                 "name": "云盘实时监控全量同步服务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.sync_all,
@@ -1057,40 +1159,6 @@ class GDCloudLinkMonitor(_PluginBase):
                     },
                     {
                         'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'enable_cloud_check', 'label': '启用网盘限制检测'}}]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{
-                                    'component': 'VTextField',
-                                    'props': {'model': 'cloud_check_interval', 'label': '检测间隔(秒)', 'placeholder': '300'}
-                                }]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [{
-                            'component': 'VCol', 'props': {'cols': 12, 'md': 6},
-                            'content': [{
-                                'component': 'VTextField',
-                                'props': {'model': 'cloud_cli_path', 'label': 'CloudDrive CLI路径', 'placeholder': '/path/to/clouddrive-cli'}
-                            }]
-                        }, {
-                            'component': 'VCol', 'props': {'cols': 12, 'md': 6},
-                            'content': [{
-                                'component': 'VTextField',
-                                'props': {'model': 'test_file_path', 'label': '测试文件路径', 'placeholder': '/path/to/test.txt'}
-                            }]
-                        }]
-                    },
-                    {
-                        'component': 'VRow',
                         'content': [{
                             'component': 'VCol', 'props': {'cols': 12},
                             'content': [{
@@ -1111,14 +1179,62 @@ class GDCloudLinkMonitor(_PluginBase):
                             }]
                         }]
                     },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'log_monitor_enabled', 'label': '启用日志监控'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'log_path', 'label': '日志文件夹路径', 'placeholder': '/path/to/logs'}
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'log_check_interval', 'label': '日志检查间隔(秒)', 'placeholder': '60'}
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'error_threshold', 'label': '错误阈值', 'placeholder': '3'}
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'recovery_check_interval', 'label': '恢复检查间隔(秒)', 'placeholder': '1800'}
+                                }]
+                            }
+                        ]
+                    },
                 ]
             }
         ], {
             "enabled": False, "notify": False, "onlyonce": False, "history": False, "scrape": False, "category": False,
             "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "softlink",
             "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0,
-            # 网盘限制检测默认配置
-            "enable_cloud_check": False, "cloud_cli_path": "", "test_file_path": "", "cloud_check_interval": 300
+            "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
+            "recovery_check_interval": 1800
         }
 
     def get_page(self) -> List[dict]:
@@ -1128,6 +1244,7 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         退出插件
         """
+        # 停止事件监控
         if self._observer:
             for observer in self._observer:
                 try:
@@ -1136,6 +1253,8 @@ class GDCloudLinkMonitor(_PluginBase):
                 except Exception as e:
                     print(str(e))
         self._observer = []
+        
+        # 停止调度器
         if self._scheduler:
             self._scheduler.remove_all_jobs()
             if self._scheduler.running:
@@ -1143,3 +1262,22 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._scheduler.shutdown()
                 self._event.clear()
             self._scheduler = None
+            
+        # 停止日志监控线程
+        if self._log_monitor_thread and self._log_monitor_thread.is_alive():
+            try:
+                self._event.set()
+                self._log_monitor_thread.join(timeout=5)
+            except Exception as e:
+                logger.error(f"停止日志监控线程时出错: {e}")
+                
+        # 停止恢复检查线程
+        if self._recovery_thread and self._recovery_thread.is_alive():
+            try:
+                self._event.set()
+                self._recovery_thread.join(timeout=5)
+            except Exception as e:
+                logger.error(f"停止恢复检查线程时出错: {e}")
+                
+        # 重置事件
+        self._event.clear()
