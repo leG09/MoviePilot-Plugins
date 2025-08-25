@@ -84,7 +84,6 @@ class QbOptimizer(_PluginBase):
     _io_cache_threshold = 70         # 写入缓存阈值（百分比）
     _io_queue_threshold = 8000       # 队列I/O任务阈值
     _speed_limit_mbps = 1            # 限制下载速度（MB/s）
-    _is_speed_limited = False        # 当前是否已限速
 
     def init_plugin(self, config: dict = None):
         logger.info("【QB种子优化】开始初始化插件...")
@@ -132,7 +131,6 @@ class QbOptimizer(_PluginBase):
             self._io_cache_threshold = float(config.get("io_cache_threshold", 70))
             self._io_queue_threshold = int(config.get("io_queue_threshold", 8000))
             self._speed_limit_mbps = float(config.get("speed_limit_mbps", 1))
-            self._is_speed_limited = False  # 重置限速状态
             
             logger.info(f"【QB种子优化】配置加载完成:")
             logger.info(f"  - 启用状态: {self._enabled}")
@@ -1364,15 +1362,25 @@ class QbOptimizer(_PluginBase):
                 # 判断是否需要限制或恢复速度
                 should_limit = disk_space_insufficient or (io_cache_high and io_queue_high)
                 
+                # 获取当前的速度限制设置
+                try:
+                    current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
+                    logger.info(f"【功能4-磁盘监控】当前速度限制 - 下载: {current_download_limit}KB/s, 上传: {current_upload_limit}KB/s")
+                except Exception as e:
+                    logger.warning(f"【功能4-磁盘监控】获取当前速度限制失败: {str(e)}")
+                    current_download_limit, current_upload_limit = 0, 0
+                
+                # 计算我们的限制值（KB/s）
+                our_limit_kbps = int(self._speed_limit_mbps * 1024)
+                
                 logger.info(f"【功能4-磁盘监控】状态检查:")
                 logger.info(f"  - 是否需要限速: {should_limit}")
-                logger.info(f"  - 当前是否已限速: {self._is_speed_limited}")
-                logger.info(f"  - 磁盘空间不足: {disk_space_insufficient}")
-                logger.info(f"  - I/O缓存过高: {io_cache_high}")
-                logger.info(f"  - I/O队列过高: {io_queue_high}")
+                logger.info(f"  - 当前下载限制: {current_download_limit}KB/s")
+                logger.info(f"  - 我们的限制值: {our_limit_kbps}KB/s")
+                logger.info(f"  - 是否已限速: {current_download_limit > 0 and current_download_limit <= our_limit_kbps}")
                 
-                if should_limit and not self._is_speed_limited:
-                    # 需要限速且当前未限速
+                if should_limit and (current_download_limit == 0 or current_download_limit > our_limit_kbps):
+                    # 需要限速且当前未限速或限制值过高
                     logger.warning(f"【功能4-磁盘监控】检测到系统资源不足，开始限制下载速度")
                     
                     # 限制下载速度
@@ -1380,7 +1388,6 @@ class QbOptimizer(_PluginBase):
                     success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
                     
                     if success:
-                        self._is_speed_limited = True  # 标记为已限速
                         logger.info(f"【功能4-磁盘监控】下载速度限制成功: {self._speed_limit_mbps}MB/s")
                         
                         # 发送通知
@@ -1407,7 +1414,7 @@ class QbOptimizer(_PluginBase):
                         logger.error(f"【功能4-磁盘监控】下载速度限制失败")
                         return False
                         
-                elif not should_limit and self._is_speed_limited:
+                elif not should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
                     # 不需要限速但当前已限速，需要恢复
                     logger.info(f"【功能4-磁盘监控】系统资源已恢复正常，开始恢复下载速度")
                     
@@ -1415,7 +1422,6 @@ class QbOptimizer(_PluginBase):
                     success = self._set_download_speed_limit(downloader_obj, 0)
                     
                     if success:
-                        self._is_speed_limited = False  # 标记为未限速
                         logger.info(f"【功能4-磁盘监控】下载速度恢复成功，已取消限制")
                         
                         # 发送通知
@@ -1439,7 +1445,7 @@ class QbOptimizer(_PluginBase):
                         logger.error(f"【功能4-磁盘监控】下载速度恢复失败")
                         return False
                         
-                elif should_limit and self._is_speed_limited:
+                elif should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
                     # 需要限速且当前已限速，无需操作
                     logger.info(f"【功能4-磁盘监控】系统资源仍不足，已处于限速状态，无需操作")
                     return True
