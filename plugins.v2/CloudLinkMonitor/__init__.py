@@ -57,7 +57,7 @@ class FileMonitorHandler(FileSystemEventHandler):
                                 mon_path=self._watch_path, event_path=event.dest_path)
 
 
-class CloudLinkMonitor(_PluginBase):
+class GDCloudLinkMonitor(_PluginBase):
     # 插件名称
     plugin_name = "多目录实时监控"
     # 插件描述
@@ -71,7 +71,7 @@ class CloudLinkMonitor(_PluginBase):
     # 作者主页
     author_url = "https://github.com/leG09"
     # 插件配置项ID前缀
-    plugin_config_prefix = "cloudlinkmonitor_"
+    plugin_config_prefix = "gd_cloudlinkmonitor_"
     # 加载顺序
     plugin_order = 4
     # 可使用的用户级别
@@ -321,7 +321,7 @@ class CloudLinkMonitor(_PluginBase):
         self.filetransfer = FileManagerModule()
         
         # 初始化状态文件路径
-        self._state_file = self.get_data_path() / "cloudlinkmonitor_state.json"
+        self._state_file = self.get_data_path() / "gd_cloudlinkmonitor_state.json"
         
         # 清空配置并在启动时从文件加载状态
         self._dirconf = {}
@@ -911,7 +911,7 @@ class CloudLinkMonitor(_PluginBase):
         """
         if self._enabled and self._cron:
             return [{
-                "id": "CloudLinkMonitor",
+                "id": "GDCloudLinkMonitor",
                 "name": "云盘实时监控全量同步服务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.sync_all,
