@@ -66,7 +66,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.8.0" # 版本号提升，添加网盘限制检测功能
+    plugin_version = "2.8.1" # 修复路径匹配问题，添加挂载路径映射配置
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -125,6 +125,7 @@ class GDCloudLinkMonitor(_PluginBase):
     _log_check_interval = 60  # 检查间隔(秒)
     _error_threshold = 3  # 错误阈值
     _recovery_check_interval = 1800  # 恢复检查间隔(30分钟)
+    _mount_path_mapping = ""  # 挂载路径映射配置
     _disabled_destinations: Dict[str, Dict[str, Any]] = {}  # 被禁用的目标目录
     _log_monitor_thread = None
     _recovery_thread = None
@@ -223,6 +224,80 @@ class GDCloudLinkMonitor(_PluginBase):
         logger.info(f"针对 '{mon_path}' 的轮询机制选择了可用目录: {chosen_dest}")
 
         return chosen_dest
+
+    def _parse_mount_path_mapping(self) -> Dict[str, str]:
+        """
+        解析挂载路径映射配置
+        格式：/gd2:/mnt/CloudDrive/gd2,/gd3:/mnt/CloudDrive/gd3
+        返回：{'/gd2': '/mnt/CloudDrive/gd2', '/gd3': '/mnt/CloudDrive/gd3'}
+        """
+        mapping = {}
+        if not self._mount_path_mapping:
+            return mapping
+            
+        try:
+            # 分割每个映射项
+            for mapping_item in self._mount_path_mapping.split(','):
+                mapping_item = mapping_item.strip()
+                if not mapping_item or ':' not in mapping_item:
+                    continue
+                    
+                parts = mapping_item.split(':', 1)
+                if len(parts) == 2:
+                    log_path = parts[0].strip()
+                    real_path = parts[1].strip()
+                    mapping[log_path] = real_path
+                    
+        except Exception as e:
+            logger.error(f"解析挂载路径映射配置时出错: {e}")
+            
+        return mapping
+
+    def _find_matching_destinations(self, mount_path: str) -> List[str]:
+        """
+        根据日志中的挂载路径找到匹配的目标目录
+        """
+        matching_destinations = []
+        
+        # 解析路径映射配置
+        mount_mapping = self._parse_mount_path_mapping()
+        
+        # 如果有配置映射，使用映射查找
+        if mount_mapping and mount_path in mount_mapping:
+            real_mount_path = mount_mapping[mount_path]
+            logger.debug(f"使用映射配置：{mount_path} -> {real_mount_path}")
+            
+            # 查找包含这个真实挂载路径的目标目录
+            for mon_path, destinations in self._dirconf.items():
+                if not destinations:
+                    continue
+                    
+                for dest in destinations:
+                    dest_str = str(dest)
+                    if dest_str.startswith(real_mount_path):
+                        matching_destinations.append(dest_str)
+                        logger.debug(f"找到匹配的目标目录：{dest_str}")
+        else:
+            # 如果没有配置映射，尝试直接匹配或模糊匹配
+            logger.debug(f"未找到映射配置，尝试直接匹配挂载路径：{mount_path}")
+            
+            for mon_path, destinations in self._dirconf.items():
+                if not destinations:
+                    continue
+                    
+                for dest in destinations:
+                    dest_str = str(dest)
+                    
+                    # 直接匹配
+                    if dest_str.startswith(mount_path):
+                        matching_destinations.append(dest_str)
+                        logger.debug(f"直接匹配到目标目录：{dest_str}")
+                    # 模糊匹配：检查目标路径中是否包含挂载路径的关键部分
+                    elif mount_path.startswith('/') and mount_path[1:] in dest_str:
+                        matching_destinations.append(dest_str)
+                        logger.debug(f"模糊匹配到目标目录：{dest_str}")
+                        
+        return matching_destinations
 
     def _get_log_file_path(self, date: datetime.date = None) -> Path:
         """
@@ -373,27 +448,29 @@ class GDCloudLinkMonitor(_PluginBase):
                     if count >= self._error_threshold:
                         logger.warning(f"挂载路径 {mount_path} 错误次数达到阈值，开始禁用相关目录")
                         
-                        # 查找使用这个挂载路径的目标目录
-                        for mon_path, destinations in self._dirconf.items():
-                            if not destinations:
-                                continue
+                        # 使用新的路径匹配方法查找目标目录
+                        matching_destinations = self._find_matching_destinations(mount_path)
+                        
+                        if not matching_destinations:
+                            logger.warning(f"未找到与挂载路径 {mount_path} 匹配的目标目录")
+                            continue
+                            
+                        logger.info(f"找到 {len(matching_destinations)} 个匹配的目标目录")
+                        
+                        for dest_str in matching_destinations:
+                            if not self._is_destination_disabled(dest_str):
+                                logger.info(f"准备禁用目标目录：{dest_str}")
+                                self._disable_destination(dest_str, f"网盘限制错误达到阈值({count}次)")
                                 
-                            for dest in destinations:
-                                dest_str = str(dest)
-                                if dest_str.startswith(mount_path):
-                                    if not self._is_destination_disabled(dest_str):
-                                        logger.info(f"准备禁用目标目录：{dest_str}")
-                                        self._disable_destination(dest_str, f"网盘限制错误达到阈值({count}次)")
-                                        
-                                        # 发送通知
-                                        if self._notify:
-                                            self.post_message(
-                                                title="网盘限制检测",
-                                                text=f"检测到目标目录 {dest_str} 出现网盘限制错误 {count} 次，已自动禁用。",
-                                                mtype=NotificationType.Manual
-                                            )
-                                    else:
-                                        logger.debug(f"目标目录 {dest_str} 已被禁用，跳过")
+                                # 发送通知
+                                if self._notify:
+                                    self.post_message(
+                                        title="网盘限制检测",
+                                        text=f"检测到目标目录 {dest_str} 出现网盘限制错误 {count} 次，已自动禁用。",
+                                        mtype=NotificationType.Manual
+                                    )
+                            else:
+                                logger.debug(f"目标目录 {dest_str} 已被禁用，跳过")
                 
                 logger.debug(f"日志检查完成，等待 {self._log_check_interval} 秒后下次检查")
                 time.sleep(self._log_check_interval)
@@ -511,6 +588,7 @@ class GDCloudLinkMonitor(_PluginBase):
             self._log_check_interval = config.get("log_check_interval", 60)
             self._error_threshold = config.get("error_threshold", 3)
             self._recovery_check_interval = config.get("recovery_check_interval", 1800)
+            self._mount_path_mapping = config.get("mount_path_mapping", "")
 
         # 停止现有任务
         self.stop_service()
@@ -658,6 +736,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "log_check_interval": self._log_check_interval,
             "error_threshold": self._error_threshold,
             "recovery_check_interval": self._recovery_check_interval,
+            "mount_path_mapping": self._mount_path_mapping,
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -1287,6 +1366,17 @@ class GDCloudLinkMonitor(_PluginBase):
                             }
                         ]
                     },
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol', 'props': {'cols': 12},
+                            'content': [{
+                                'component': 'VTextarea',
+                                'props': {'model': 'mount_path_mapping', 'label': '挂载路径映射', 'rows': 3,
+                                          'placeholder': '格式：/gd2:/mnt/CloudDrive/gd2,/gd3:/mnt/CloudDrive/gd3\n用于映射日志中的挂载路径到实际目录路径'}
+                            }]
+                        }]
+                    },
                 ]
             }
         ], {
@@ -1294,7 +1384,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "softlink",
             "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0,
             "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
-            "recovery_check_interval": 1800
+            "recovery_check_interval": 1800, "mount_path_mapping": ""
         }
 
     def get_page(self) -> List[dict]:
