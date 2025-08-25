@@ -1364,6 +1364,13 @@ class QbOptimizer(_PluginBase):
                 # 判断是否需要限制或恢复速度
                 should_limit = disk_space_insufficient or (io_cache_high and io_queue_high)
                 
+                logger.info(f"【功能4-磁盘监控】状态检查:")
+                logger.info(f"  - 是否需要限速: {should_limit}")
+                logger.info(f"  - 当前是否已限速: {self._is_speed_limited}")
+                logger.info(f"  - 磁盘空间不足: {disk_space_insufficient}")
+                logger.info(f"  - I/O缓存过高: {io_cache_high}")
+                logger.info(f"  - I/O队列过高: {io_queue_high}")
+                
                 if should_limit and not self._is_speed_limited:
                     # 需要限速且当前未限速
                     logger.warning(f"【功能4-磁盘监控】检测到系统资源不足，开始限制下载速度")
