@@ -605,7 +605,11 @@ class QbOptimizer(_PluginBase):
         """
         提升做种数多的种子下载优先级
         """
-        logger.info(f"【功能3-综合评分】开始综合评分优先级优化")
+        logger.info(f"【功能3-综合评分】开始综合评分优先级优化，功能开关: {self._enable_score_priority}")
+        
+        if not self._enable_score_priority:
+            logger.info("【功能3-综合评分】综合评分优先级优化功能已禁用，跳过")
+            return 0
             
         logger.info(f"【功能3-综合评分】检查条件: 最低综合评分阈值={self._min_score_threshold}")
 
@@ -1294,17 +1298,30 @@ class QbOptimizer(_PluginBase):
                     data={'rid': 0}
                 )
                 
+                logger.debug(f"【功能4-磁盘监控】API响应类型: {type(response)}")
                 logger.debug(f"【功能4-磁盘监控】API响应: {response}")
                 
                 if not response:
                     logger.error("【功能4-磁盘监控】API响应为空")
                     return False
-                    
-                if 'server_state' not in response:
-                    logger.error(f"【功能4-磁盘监控】API响应中缺少server_state字段，响应内容: {response}")
+                
+                # 如果响应是HTTP响应对象，需要获取JSON内容
+                if hasattr(response, 'json'):
+                    try:
+                        response_data = response.json()
+                        logger.debug(f"【功能4-磁盘监控】解析后的JSON数据: {response_data}")
+                    except Exception as json_error:
+                        logger.error(f"【功能4-磁盘监控】JSON解析失败: {str(json_error)}")
+                        return False
+                else:
+                    # 如果已经是字典，直接使用
+                    response_data = response
+                
+                if not response_data or 'server_state' not in response_data:
+                    logger.error(f"【功能4-磁盘监控】API响应中缺少server_state字段，响应内容: {response_data}")
                     return False
                 
-                server_state = response['server_state']
+                server_state = response_data['server_state']
                 
                 # 获取各项指标
                 free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
