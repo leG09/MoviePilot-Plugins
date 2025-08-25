@@ -97,6 +97,9 @@ class QbOptimizer(_PluginBase):
             self._onlyonce = config.get("onlyonce")
             self._notify = config.get("notify")
             self._downloaders = config.get("downloaders") or []
+            if not self._downloaders:
+                logger.error("【QB种子优化】错误：未配置下载器，请先在插件配置中选择下载器")
+                return
             self._cron = config.get("cron")
             
             # 功能开关
@@ -353,6 +356,10 @@ class QbOptimizer(_PluginBase):
         """
         logger.info("【QB种子优化】开始执行种子优化任务...")
         logger.info(f"【QB种子优化】配置的下载器: {self._downloaders}")
+        
+        if not self._downloaders:
+            logger.error("【QB种子优化】错误：未配置下载器，无法执行优化任务")
+            return
         
         total_zero_seed_removed = 0
         total_priority_boosted = 0
@@ -1336,8 +1343,8 @@ class QbOptimizer(_PluginBase):
                 
                 # 获取各项指标
                 free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
-                write_cache_overload = server_state.get('write_cache_overload', 0)  # 百分比
-                queued_io_jobs = server_state.get('queued_io_jobs', 0)  # I/O任务数
+                write_cache_overload = float(server_state.get('write_cache_overload', 0))  # 百分比，确保是数值
+                queued_io_jobs = int(server_state.get('queued_io_jobs', 0))  # I/O任务数，确保是整数
                 
                 logger.info(f"【功能4-磁盘监控】服务器状态:")
                 logger.info(f"  - 磁盘剩余空间: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB)")
