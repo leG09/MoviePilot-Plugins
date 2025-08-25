@@ -1143,4 +1143,3 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._scheduler.shutdown()
                 self._event.clear()
             self._scheduler = None
- No newline at end of file
