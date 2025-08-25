@@ -69,7 +69,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
-    author_url = "https://github.com/leG09"
+    author_url = "https://github.com/leGO9"
     # 插件配置项ID前缀
     plugin_config_prefix = "gd_cloudlinkmonitor_"
     # 加载顺序
