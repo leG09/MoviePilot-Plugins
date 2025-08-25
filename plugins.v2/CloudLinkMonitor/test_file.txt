@@ -1,3 +1,0 @@
-This is a test file for cloud drive status check.
-Used by GDCloudLinkMonitor plugin to detect if the cloud drive is restricted.
-This file will be uploaded to test the cloud drive's upload capability.
