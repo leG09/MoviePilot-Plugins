@@ -1448,8 +1448,8 @@ class QbOptimizer(_PluginBase):
                 logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
                 return False
             
-            if final_should_limit and (current_download_limit == 0 or current_download_limit > our_limit_kbps):
-                # 需要限速且当前未限速或限制值过高
+            if final_should_limit and current_download_limit == 0:
+                # 需要限速且当前未限速
                 logger.warning(f"【功能4-磁盘监控】持续监测确认系统资源不足，开始限制下载速度")
                 
                 # 限制下载速度
@@ -1483,7 +1483,7 @@ class QbOptimizer(_PluginBase):
                     logger.error(f"【功能4-磁盘监控】下载速度限制失败")
                     return False
                     
-            elif not final_should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
+            elif not final_should_limit and current_download_limit > 0:
                 # 不需要限速但当前已限速，需要恢复
                 logger.info(f"【功能4-磁盘监控】持续监测确认系统资源已恢复正常，开始恢复下载速度")
                 
@@ -1514,7 +1514,7 @@ class QbOptimizer(_PluginBase):
                     logger.error(f"【功能4-磁盘监控】下载速度恢复失败")
                     return False
                     
-            elif final_should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
+            elif final_should_limit and current_download_limit > 0:
                 # 需要限速且当前已限速，无需操作
                 logger.info(f"【功能4-磁盘监控】持续监测确认系统资源仍不足，已处于限速状态，无需操作")
                 return True
