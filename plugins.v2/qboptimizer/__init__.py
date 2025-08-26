@@ -1278,9 +1278,122 @@ class QbOptimizer(_PluginBase):
         
         return len(timeout_torrents), redownload_failed_torrents
 
+    def _check_system_status_once(self, qb_client):
+        """
+        单次检查系统状态
+        """
+        try:
+            # 调用qBittorrent API获取服务器状态
+            response = qb_client._request(
+                http_method='POST',
+                api_namespace='sync',
+                api_method='maindata',
+                data={'rid': 0}
+            )
+            
+            # 解析响应数据
+            try:
+                response_data = response.json()
+            except:
+                # 如果response.json()不可用，尝试用json.loads
+                import json
+                response_data = json.loads(response.text)
+            
+            if 'server_state' not in response_data:
+                return None
+            
+            server_state = response_data['server_state']
+            
+            # 获取各项指标
+            free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
+            write_cache_overload = float(server_state.get('write_cache_overload', 0))  # 百分比，确保是数值
+            queued_io_jobs = int(server_state.get('queued_io_jobs', 0))  # I/O任务数，确保是整数
+            
+            # 判断是否需要限制速度
+            disk_space_insufficient = free_space_gb < self._disk_space_threshold
+            io_cache_high = write_cache_overload > self._io_cache_threshold
+            io_queue_high = queued_io_jobs > self._io_queue_threshold
+            should_limit = disk_space_insufficient or io_cache_high or io_queue_high
+            
+            return {
+                'free_space_gb': free_space_gb,
+                'write_cache_overload': write_cache_overload,
+                'queued_io_jobs': queued_io_jobs,
+                'disk_space_insufficient': disk_space_insufficient,
+                'io_cache_high': io_cache_high,
+                'io_queue_high': io_queue_high,
+                'should_limit': should_limit
+            }
+            
+        except Exception as e:
+            logger.debug(f"【功能4-磁盘监控】单次检查异常: {str(e)}")
+            return None
+
+    def _continuous_monitor_system(self, qb_client, monitor_count=5, monitor_interval=2):
+        """
+        持续监测系统状态，确保决策稳定性
+        """
+        logger.info(f"【功能4-磁盘监控】开始持续监测 {monitor_count * monitor_interval} 秒，每 {monitor_interval} 秒检查一次")
+        
+        monitor_results = []
+        
+        for i in range(monitor_count):
+            logger.debug(f"【功能4-磁盘监控】第 {i+1}/{monitor_count} 次检查")
+            
+            # 单次检查
+            result = self._check_system_status_once(qb_client)
+            if result:
+                monitor_results.append(result)
+                logger.debug(f"【功能4-磁盘监控】第 {i+1} 次检查结果: 磁盘{result['free_space_gb']:.1f}GB, I/O缓存{result['write_cache_overload']:.1f}%, I/O队列{result['queued_io_jobs']}, 需要限速: {result['should_limit']}")
+            else:
+                logger.warning(f"【功能4-磁盘监控】第 {i+1} 次检查失败")
+            
+            # 如果不是最后一次检查，等待指定间隔
+            if i < monitor_count - 1:
+                import time
+                time.sleep(monitor_interval)
+        
+        if not monitor_results:
+            logger.error(f"【功能4-磁盘监控】所有监测都失败，无法做出决策")
+            return None, None, None
+        
+        # 计算需要限速的次数
+        should_limit_count = sum(1 for result in monitor_results if result['should_limit'])
+        should_limit_ratio = should_limit_count / len(monitor_results)
+        
+        # 计算平均值用于显示
+        avg_free_space = sum(r['free_space_gb'] for r in monitor_results) / len(monitor_results)
+        avg_cache_overload = sum(r['write_cache_overload'] for r in monitor_results) / len(monitor_results)
+        avg_io_jobs = sum(r['queued_io_jobs'] for r in monitor_results) / len(monitor_results)
+        
+        logger.info(f"【功能4-磁盘监控】持续监测完成，共 {len(monitor_results)} 次有效检查")
+        logger.info(f"【功能4-磁盘监控】平均状态:")
+        logger.info(f"  - 磁盘剩余空间: {avg_free_space:.2f}GB (阈值: {self._disk_space_threshold}GB)")
+        logger.info(f"  - 写入缓存过载: {avg_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)")
+        logger.info(f"  - 队列I/O任务: {avg_io_jobs:.0f} (阈值: {self._io_queue_threshold})")
+        logger.info(f"【功能4-磁盘监控】需要限速的比例: {should_limit_count}/{len(monitor_results)} ({should_limit_ratio:.1%})")
+        
+        # 决策阈值：超过60%的检查认为需要限速，才执行限速操作
+        final_should_limit = should_limit_ratio > 0.6
+        
+        logger.info(f"【功能4-磁盘监控】最终决策: {'需要限速' if final_should_limit else '无需限速'} (阈值: 60%)")
+        
+        # 准备通知消息的数据
+        notification_data = {
+            'monitor_count': len(monitor_results),
+            'avg_free_space': avg_free_space,
+            'avg_cache_overload': avg_cache_overload,
+            'avg_io_jobs': avg_io_jobs,
+            'disk_issues': sum(1 for r in monitor_results if r['disk_space_insufficient']),
+            'cache_issues': sum(1 for r in monitor_results if r['io_cache_high']),
+            'queue_issues': sum(1 for r in monitor_results if r['io_queue_high'])
+        }
+        
+        return final_should_limit, notification_data, monitor_results
+
     def _monitor_disk_and_io(self, downloader_obj, downloader_name):
         """
-        监控磁盘空间和I/O状态，在条件满足时限制下载速度
+        监控磁盘空间和I/O状态，持续监测10秒后决定是否限制下载速度
         """
         logger.info(f"【功能4-磁盘监控】开始磁盘空间和I/O监控，功能开关: {self._enable_disk_monitor}")
         
@@ -1295,168 +1408,98 @@ class QbOptimizer(_PluginBase):
                 logger.error("【功能4-磁盘监控】无法获取qBittorrent客户端")
                 return False
             
-            # 调用qBittorrent API获取服务器状态
+            # 持续监测系统状态
+            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(qb_client)
+            
+            if final_should_limit is None:
+                logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
+                return False
+            
+            # 获取当前的速度限制设置
             try:
-                # 使用POST方法，包含rid参数
-                response = qb_client._request(
-                    http_method='POST',
-                    api_namespace='sync',
-                    api_method='maindata',
-                    data={'rid': 0}
-                )
+                current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
+                logger.info(f"【功能4-磁盘监控】当前速度限制 - 下载: {current_download_limit}KB/s, 上传: {current_upload_limit}KB/s")
+            except Exception as e:
+                logger.warning(f"【功能4-磁盘监控】获取当前速度限制失败: {str(e)}")
+                current_download_limit, current_upload_limit = 0, 0
+            
+            # 计算我们的限制值（KB/s）
+            our_limit_kbps = int(self._speed_limit_mbps * 1024)
+            
+            if final_should_limit and (current_download_limit == 0 or current_download_limit > our_limit_kbps):
+                # 需要限速且当前未限速或限制值过高
+                logger.warning(f"【功能4-磁盘监控】持续监测确认系统资源不足，开始限制下载速度")
                 
-                logger.debug(f"【功能4-磁盘监控】API响应类型: {type(response)}")
-                logger.debug(f"【功能4-磁盘监控】API响应: {response}")
+                # 限制下载速度
+                speed_limit_bytes = int(self._speed_limit_mbps * 1024 * 1024)  # 转换为字节/秒
+                success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
                 
-                if not response:
-                    logger.error("【功能4-磁盘监控】API响应为空")
-                    return False
-                
-                # 如果响应是HTTP响应对象，需要获取JSON内容
-                if hasattr(response, 'json'):
-                    try:
-                        response_data = response.json()
-                        logger.debug(f"【功能4-磁盘监控】解析后的JSON数据: {response_data}")
-                    except Exception as json_error:
-                        logger.error(f"【功能4-磁盘监控】JSON解析失败: {str(json_error)}")
-                        return False
-                elif hasattr(response, 'text'):
-                    # 如果是HTTP响应对象但没有json方法，尝试解析文本
-                    try:
-                        import json
-                        response_data = json.loads(response.text)
-                        logger.debug(f"【功能4-磁盘监控】从文本解析的JSON数据: {response_data}")
-                    except Exception as json_error:
-                        logger.error(f"【功能4-磁盘监控】文本JSON解析失败: {str(json_error)}, 响应文本: {response.text}")
-                        return False
-                else:
-                    # 如果已经是字典，直接使用
-                    response_data = response
-                
-                if not response_data or 'server_state' not in response_data:
-                    logger.error(f"【功能4-磁盘监控】API响应中缺少server_state字段，响应内容: {response_data}")
-                    return False
-                
-                server_state = response_data['server_state']
-                
-                # 获取各项指标
-                free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
-                write_cache_overload = float(server_state.get('write_cache_overload', 0))  # 百分比，确保是数值
-                queued_io_jobs = int(server_state.get('queued_io_jobs', 0))  # I/O任务数，确保是整数
-                
-                logger.info(f"【功能4-磁盘监控】服务器状态:")
-                logger.info(f"  - 磁盘剩余空间: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB)")
-                logger.info(f"  - 写入缓存过载: {write_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)")
-                logger.info(f"  - 队列I/O任务: {queued_io_jobs} (阈值: {self._io_queue_threshold})")
-                
-                # 判断是否需要限制速度
-                disk_space_insufficient = free_space_gb < self._disk_space_threshold
-                io_cache_high = write_cache_overload > self._io_cache_threshold
-                io_queue_high = queued_io_jobs > self._io_queue_threshold
-                
-                logger.info(f"【功能4-磁盘监控】检查结果:")
-                logger.info(f"  - 磁盘空间不足: {disk_space_insufficient} ({free_space_gb:.2f}GB < {self._disk_space_threshold}GB)")
-                logger.info(f"  - I/O缓存过高: {io_cache_high} ({write_cache_overload:.1f}% > {self._io_cache_threshold}%)")
-                logger.info(f"  - I/O队列过高: {io_queue_high} ({queued_io_jobs} > {self._io_queue_threshold})")
-                
-                # 判断是否需要限制或恢复速度
-                should_limit = disk_space_insufficient or (io_cache_high and io_queue_high)
-                
-                # 获取当前的速度限制设置
-                try:
-                    current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
-                    logger.info(f"【功能4-磁盘监控】当前速度限制 - 下载: {current_download_limit}KB/s, 上传: {current_upload_limit}KB/s")
-                except Exception as e:
-                    logger.warning(f"【功能4-磁盘监控】获取当前速度限制失败: {str(e)}")
-                    current_download_limit, current_upload_limit = 0, 0
-                
-                # 计算我们的限制值（KB/s）
-                our_limit_kbps = int(self._speed_limit_mbps * 1024)
-                
-                logger.info(f"【功能4-磁盘监控】状态检查:")
-                logger.info(f"  - 是否需要限速: {should_limit}")
-                logger.info(f"  - 当前下载限制: {current_download_limit}KB/s")
-                logger.info(f"  - 我们的限制值: {our_limit_kbps}KB/s")
-                logger.info(f"  - 是否已限速: {current_download_limit > 0 and current_download_limit <= our_limit_kbps}")
-                
-                if should_limit and (current_download_limit == 0 or current_download_limit > our_limit_kbps):
-                    # 需要限速且当前未限速或限制值过高
-                    logger.warning(f"【功能4-磁盘监控】检测到系统资源不足，开始限制下载速度")
+                if success:
+                    logger.info(f"【功能4-磁盘监控】下载速度限制成功: {self._speed_limit_mbps}MB/s")
                     
-                    # 限制下载速度
-                    speed_limit_bytes = int(self._speed_limit_mbps * 1024 * 1024)  # 转换为字节/秒
-                    success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
+                    # 发送通知
+                    if self._notify and notification_data:
+                        notification_title = "【QB种子优化】系统资源不足，已限制下载速度"
+                        notification_text = f"持续监测{notification_data['monitor_count']}次，发现以下问题:\n"
+                        if notification_data['disk_issues'] > 0:
+                            notification_text += f"• 磁盘空间不足: {notification_data['disk_issues']}/{notification_data['monitor_count']}次 (平均: {notification_data['avg_free_space']:.2f}GB, 阈值: {self._disk_space_threshold}GB)\n"
+                        if notification_data['cache_issues'] > 0:
+                            notification_text += f"• I/O缓存过高: {notification_data['cache_issues']}/{notification_data['monitor_count']}次 (平均: {notification_data['avg_cache_overload']:.1f}%, 阈值: {self._io_cache_threshold}%)\n"
+                        if notification_data['queue_issues'] > 0:
+                            notification_text += f"• I/O队列过高: {notification_data['queue_issues']}/{notification_data['monitor_count']}次 (平均: {notification_data['avg_io_jobs']:.0f}, 阈值: {self._io_queue_threshold})\n"
+                        notification_text += f"\n已自动限制下载速度为: {self._speed_limit_mbps}MB/s"
+                        
+                        self.post_message(
+                            mtype=NotificationType.Manual,
+                            title=notification_title,
+                            text=notification_text
+                        )
+                        logger.info(f"【功能4-磁盘监控】已发送资源不足通知")
                     
-                    if success:
-                        logger.info(f"【功能4-磁盘监控】下载速度限制成功: {self._speed_limit_mbps}MB/s")
-                        
-                        # 发送通知
-                        if self._notify:
-                            notification_title = "【QB种子优化】系统资源不足，已限制下载速度"
-                            notification_text = f"检测到以下问题:\n"
-                            if disk_space_insufficient:
-                                notification_text += f"• 磁盘空间不足: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB)\n"
-                            if io_cache_high:
-                                notification_text += f"• I/O缓存使用率过高: {write_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)\n"
-                            if io_queue_high:
-                                notification_text += f"• 队列I/O任务过多: {queued_io_jobs} (阈值: {self._io_queue_threshold})\n"
-                            notification_text += f"\n已自动限制下载速度为: {self._speed_limit_mbps}MB/s"
-                            
-                            self.post_message(
-                                mtype=NotificationType.Manual,
-                                title=notification_title,
-                                text=notification_text
-                            )
-                            logger.info(f"【功能4-磁盘监控】已发送资源不足通知")
-                        
-                        return True
-                    else:
-                        logger.error(f"【功能4-磁盘监控】下载速度限制失败")
-                        return False
-                        
-                elif not should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
-                    # 不需要限速但当前已限速，需要恢复
-                    logger.info(f"【功能4-磁盘监控】系统资源已恢复正常，开始恢复下载速度")
-                    
-                    # 恢复下载速度（设置为0表示无限制）
-                    success = self._set_download_speed_limit(downloader_obj, 0)
-                    
-                    if success:
-                        logger.info(f"【功能4-磁盘监控】下载速度恢复成功，已取消限制")
-                        
-                        # 发送通知
-                        if self._notify:
-                            notification_title = "【QB种子优化】系统资源已恢复，已取消下载速度限制"
-                            notification_text = f"系统资源已恢复正常:\n"
-                            notification_text += f"• 磁盘剩余空间: {free_space_gb:.2f}GB (阈值: {self._disk_space_threshold}GB) ✓\n"
-                            notification_text += f"• I/O缓存使用率: {write_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%) ✓\n"
-                            notification_text += f"• 队列I/O任务: {queued_io_jobs} (阈值: {self._io_queue_threshold}) ✓\n"
-                            notification_text += f"\n已自动取消下载速度限制"
-                            
-                            self.post_message(
-                                mtype=NotificationType.Manual,
-                                title=notification_title,
-                                text=notification_text
-                            )
-                            logger.info(f"【功能4-磁盘监控】已发送资源恢复通知")
-                        
-                        return True
-                    else:
-                        logger.error(f"【功能4-磁盘监控】下载速度恢复失败")
-                        return False
-                        
-                elif should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
-                    # 需要限速且当前已限速，无需操作
-                    logger.info(f"【功能4-磁盘监控】系统资源仍不足，已处于限速状态，无需操作")
                     return True
-                    
                 else:
-                    # 不需要限速且当前未限速，无需操作
-                    logger.info(f"【功能4-磁盘监控】系统资源正常，无需限制下载速度")
+                    logger.error(f"【功能4-磁盘监控】下载速度限制失败")
                     return False
                     
-            except Exception as api_error:
-                logger.error(f"【功能4-磁盘监控】qBittorrent API调用失败: {str(api_error)}")
+            elif not final_should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
+                # 不需要限速但当前已限速，需要恢复
+                logger.info(f"【功能4-磁盘监控】持续监测确认系统资源已恢复正常，开始恢复下载速度")
+                
+                # 恢复下载速度（设置为0表示无限制）
+                success = self._set_download_speed_limit(downloader_obj, 0)
+                
+                if success:
+                    logger.info(f"【功能4-磁盘监控】下载速度恢复成功，已取消限制")
+                    
+                    # 发送通知
+                    if self._notify and notification_data:
+                        notification_title = "【QB种子优化】系统资源已恢复，已取消下载速度限制"
+                        notification_text = f"持续监测{notification_data['monitor_count']}次，系统资源已恢复正常:\n"
+                        notification_text += f"• 磁盘剩余空间: {notification_data['avg_free_space']:.2f}GB (阈值: {self._disk_space_threshold}GB) ✓\n"
+                        notification_text += f"• I/O缓存使用率: {notification_data['avg_cache_overload']:.1f}% (阈值: {self._io_cache_threshold}%) ✓\n"
+                        notification_text += f"• 队列I/O任务: {notification_data['avg_io_jobs']:.0f} (阈值: {self._io_queue_threshold}) ✓\n"
+                        notification_text += f"\n已自动取消下载速度限制"
+                        
+                        self.post_message(
+                            mtype=NotificationType.Manual,
+                            title=notification_title,
+                            text=notification_text
+                        )
+                        logger.info(f"【功能4-磁盘监控】已发送资源恢复通知")
+                    
+                    return True
+                else:
+                    logger.error(f"【功能4-磁盘监控】下载速度恢复失败")
+                    return False
+                    
+            elif final_should_limit and current_download_limit > 0 and current_download_limit <= our_limit_kbps:
+                # 需要限速且当前已限速，无需操作
+                logger.info(f"【功能4-磁盘监控】持续监测确认系统资源仍不足，已处于限速状态，无需操作")
+                return True
+                
+            else:
+                # 不需要限速且当前未限速，无需操作
+                logger.info(f"【功能4-磁盘监控】持续监测确认系统资源正常，无需限制下载速度")
                 return False
                 
         except Exception as e:
