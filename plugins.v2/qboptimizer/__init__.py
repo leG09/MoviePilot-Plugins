@@ -1420,13 +1420,6 @@ class QbOptimizer(_PluginBase):
                 logger.error("【功能4-磁盘监控】无法获取qBittorrent客户端")
                 return False
             
-            # 持续监测系统状态
-            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(qb_client, self._monitor_duration, self._monitor_interval)
-            
-            if final_should_limit is None:
-                logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
-                return False
-            
             # 获取当前的速度限制设置
             try:
                 current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
@@ -1437,6 +1430,23 @@ class QbOptimizer(_PluginBase):
             
             # 计算我们的限制值（KB/s）
             our_limit_kbps = int(self._speed_limit_mbps * 1024)
+            
+            # 如果当前已限速，先解除限速再监测
+            if current_download_limit > 0 and current_download_limit <= our_limit_kbps:
+                logger.info(f"【功能4-磁盘监控】检测到当前已处于限速状态，先解除限速以获得真实系统状态")
+                temp_unlimit_success = self._set_download_speed_limit(downloader_obj, 0)
+                if temp_unlimit_success:
+                    logger.info(f"【功能4-磁盘监控】临时解除限速成功，等待5秒后开始监测...")
+                    time.sleep(5)  # 等待系统状态稳定
+                else:
+                    logger.warning(f"【功能4-磁盘监控】临时解除限速失败，将在限速状态下进行监测")
+            
+            # 持续监测系统状态
+            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(qb_client, self._monitor_duration, self._monitor_interval)
+            
+            if final_should_limit is None:
+                logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
+                return False
             
             if final_should_limit and (current_download_limit == 0 or current_download_limit > our_limit_kbps):
                 # 需要限速且当前未限速或限制值过高
