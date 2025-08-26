@@ -45,12 +45,43 @@ class XGMediaServerRefresh(_PluginBase):
     _lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
-
+        """
+        初始化插件
+        """
+        logger.info("【媒体库服务器刷新】插件初始化开始...")
+        
         if config:
             self._enabled = config.get("enabled")
             self._delay = config.get("delay") or 0
             self._mediaservers = config.get("mediaservers") or []
             self._path_mapping = config.get("path_mapping", "")
+            
+            logger.info(f"【媒体库服务器刷新】插件配置加载完成:")
+            logger.info(f"  - 启用状态: {self._enabled}")
+            logger.info(f"  - 延迟时间: {self._delay}秒")
+            logger.info(f"  - 媒体服务器: {self._mediaservers}")
+            logger.info(f"  - 路径映射: {self._path_mapping}")
+        else:
+            logger.warning("【媒体库服务器刷新】插件配置为空，使用默认配置")
+            self._enabled = False
+            self._delay = 0
+            self._mediaservers = []
+            self._path_mapping = ""
+        
+        if self._enabled:
+            logger.info("【媒体库服务器刷新】插件已启用，开始检查媒体服务器配置...")
+            # 检查媒体服务器配置
+            service_infos = self.service_infos
+            if service_infos:
+                logger.info(f"【媒体库服务器刷新】媒体服务器配置检查完成，共 {len(service_infos)} 个可用服务器")
+                for name, service in service_infos.items():
+                    logger.info(f"  - {name}: {service.instance.__class__.__name__}")
+            else:
+                logger.warning("【媒体库服务器刷新】未找到可用的媒体服务器，插件功能将受限")
+        else:
+            logger.info("【媒体库服务器刷新】插件已禁用")
+        
+        logger.info("【媒体库服务器刷新】插件初始化完成")
 
     @property
     def service_infos(self) -> Optional[Dict[str, ServiceInfo]]:
@@ -254,22 +285,28 @@ class XGMediaServerRefresh(_PluginBase):
     @eventmanager.register(EventType.TransferComplete)
     def refresh(self, event: Event):
         """
-        发送通知消息
+        处理入库完成事件，刷新媒体库
         """
+        logger.info("【媒体库服务器刷新】收到入库完成事件")
+        
         if not self._enabled:
+            logger.debug("【媒体库服务器刷新】插件已禁用，跳过处理")
             return
 
         event_info: dict = event.event_data
         if not event_info:
+            logger.warning("【媒体库服务器刷新】事件数据为空，跳过处理")
             return
 
         # 刷新媒体库
         if not self.service_infos:
+            logger.warning("【媒体库服务器刷新】未配置媒体服务器，跳过处理")
             return
 
         # 入库数据
         transferinfo: TransferInfo = event_info.get("transferinfo")
         if not transferinfo or not transferinfo.target_diritem or not transferinfo.target_diritem.path:
+            logger.warning("【媒体库服务器刷新】入库信息不完整，跳过处理")
             return
 
         def debounce_delay(duration: int):
@@ -296,9 +333,13 @@ class XGMediaServerRefresh(_PluginBase):
 
         mediainfo: MediaInfo = event_info.get("mediainfo")
         
+        logger.info(f"【媒体库服务器刷新】处理媒体信息: {mediainfo.title} ({mediainfo.year}) - {mediainfo.type}")
+        
         # 应用路径映射
         original_path = Path(transferinfo.target_diritem.path)
         mapped_path = self._map_path(original_path)
+        
+        logger.info(f"【媒体库服务器刷新】路径映射: {original_path} -> {mapped_path}")
         
         item = RefreshMediaItem(
             title=mediainfo.title,
@@ -309,32 +350,49 @@ class XGMediaServerRefresh(_PluginBase):
         )
 
         if self._delay:
-            logger.info(f"延迟 {self._delay} 秒后刷新媒体库... ")
+            logger.info(f"【媒体库服务器刷新】延迟 {self._delay} 秒后刷新媒体库...")
             with self._lock:
                 self._pending_items.append(item)
             if not debounce_delay(self._delay):
                 # 还在延迟中 忽略本次请求
+                logger.debug("【媒体库服务器刷新】延迟中，忽略本次请求")
                 return
             with self._lock:
                 items = self._pending_items
                 self._pending_items = []
+                logger.info(f"【媒体库服务器刷新】延迟结束，准备刷新 {len(items)} 个项目")
         else:
             items = [item]
+            logger.info("【媒体库服务器刷新】立即刷新媒体库")
 
+        logger.info(f"【媒体库服务器刷新】开始刷新 {len(self.service_infos)} 个媒体服务器")
+        
         for name, service in self.service_infos.items():
-            if hasattr(service.instance, 'refresh_library_by_items'):
-                service.instance.refresh_library_by_items(items)
-            elif hasattr(service.instance, 'refresh_root_library'):
-                # FIXME Jellyfin未找到刷新单个项目的API
-                service.instance.refresh_root_library()
-            else:
-                logger.warning(f"{name} 不支持刷新")
+            logger.info(f"【媒体库服务器刷新】正在刷新服务器: {name}")
+            try:
+                if hasattr(service.instance, 'refresh_library_by_items'):
+                    logger.info(f"【媒体库服务器刷新】使用 refresh_library_by_items 方法刷新 {name}")
+                    service.instance.refresh_library_by_items(items)
+                    logger.info(f"【媒体库服务器刷新】{name} 刷新完成")
+                elif hasattr(service.instance, 'refresh_root_library'):
+                    # FIXME Jellyfin未找到刷新单个项目的API
+                    logger.info(f"【媒体库服务器刷新】使用 refresh_root_library 方法刷新 {name}")
+                    service.instance.refresh_root_library()
+                    logger.info(f"【媒体库服务器刷新】{name} 刷新完成")
+                else:
+                    logger.warning(f"【媒体库服务器刷新】{name} 不支持刷新操作")
+            except Exception as e:
+                logger.error(f"【媒体库服务器刷新】刷新 {name} 时发生错误: {str(e)}")
+        
+        logger.info("【媒体库服务器刷新】所有媒体服务器刷新操作完成")
 
     def stop_service(self):
         """
         退出插件
         """
+        logger.info("【媒体库服务器刷新】插件正在停止...")
         with self._lock:
             # 放弃等待，立即刷新
             self._end_time = 0.0
             # self._pending_items.clear()
+        logger.info("【媒体库服务器刷新】插件已停止")
