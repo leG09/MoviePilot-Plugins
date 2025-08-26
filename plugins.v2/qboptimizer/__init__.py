@@ -1369,10 +1369,6 @@ class QbOptimizer(_PluginBase):
             logger.error(f"【功能4-磁盘监控】所有监测都失败，无法做出决策")
             return None, None, None
         
-        # 计算需要限速的次数
-        should_limit_count = sum(1 for result in monitor_results if result['should_limit'])
-        should_limit_ratio = should_limit_count / len(monitor_results)
-        
         # 计算平均值用于显示
         avg_free_space = sum(r['free_space_gb'] for r in monitor_results) / len(monitor_results)
         avg_cache_overload = sum(r['write_cache_overload'] for r in monitor_results) / len(monitor_results)
@@ -1383,12 +1379,16 @@ class QbOptimizer(_PluginBase):
         logger.info(f"  - 磁盘剩余空间: {avg_free_space:.2f}GB (阈值: {self._disk_space_threshold}GB)")
         logger.info(f"  - 写入缓存过载: {avg_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)")
         logger.info(f"  - 队列I/O任务: {avg_io_jobs:.0f} (阈值: {self._io_queue_threshold})")
-        logger.info(f"【功能4-磁盘监控】需要限速的比例: {should_limit_count}/{len(monitor_results)} ({should_limit_ratio:.1%})")
         
-        # 决策规则：任一检查判定需要限速则限速（满足任一条件即可）
-        final_should_limit = should_limit_count > 0
-        
-        logger.info(f"【功能4-磁盘监控】最终决策: {'需要限速' if final_should_limit else '无需限速'} (规则: 任一条件满足即限速)")
+        # 决策规则：使用平均值与阈值对比
+        disk_space_insufficient_avg = avg_free_space < self._disk_space_threshold
+        io_cache_high_avg = avg_cache_overload > self._io_cache_threshold
+        io_queue_high_avg = avg_io_jobs > self._io_queue_threshold
+        final_should_limit = disk_space_insufficient_avg or io_cache_high_avg or io_queue_high_avg
+
+        logger.info(
+            f"【功能4-磁盘监控】最终决策: {'需要限速' if final_should_limit else '无需限速'}"
+        )
         
         # 准备通知消息的数据
         notification_data = {
