@@ -1385,10 +1385,10 @@ class QbOptimizer(_PluginBase):
         logger.info(f"  - 队列I/O任务: {avg_io_jobs:.0f} (阈值: {self._io_queue_threshold})")
         logger.info(f"【功能4-磁盘监控】需要限速的比例: {should_limit_count}/{len(monitor_results)} ({should_limit_ratio:.1%})")
         
-        # 决策阈值：超过60%的检查认为需要限速，才执行限速操作
-        final_should_limit = should_limit_ratio > 0.6
+        # 决策规则：任一检查判定需要限速则限速（满足任一条件即可）
+        final_should_limit = should_limit_count > 0
         
-        logger.info(f"【功能4-磁盘监控】最终决策: {'需要限速' if final_should_limit else '无需限速'} (阈值: 60%)")
+        logger.info(f"【功能4-磁盘监控】最终决策: {'需要限速' if final_should_limit else '无需限速'} (规则: 任一条件满足即限速)")
         
         # 准备通知消息的数据
         notification_data = {
