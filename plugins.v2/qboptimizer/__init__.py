@@ -84,6 +84,8 @@ class QbOptimizer(_PluginBase):
     _io_cache_threshold = 70         # 写入缓存阈值（百分比）
     _io_queue_threshold = 8000       # 队列I/O任务阈值
     _speed_limit_mbps = 1            # 限制下载速度（MB/s）
+    _monitor_duration = 30           # 持续监测时长（秒）
+    _monitor_interval = 3            # 监测间隔（秒）
 
     def init_plugin(self, config: dict = None):
         logger.info("【QB种子优化】开始初始化插件...")
@@ -131,6 +133,8 @@ class QbOptimizer(_PluginBase):
             self._io_cache_threshold = float(config.get("io_cache_threshold", 70))
             self._io_queue_threshold = int(config.get("io_queue_threshold", 8000))
             self._speed_limit_mbps = float(config.get("speed_limit_mbps", 1))
+            self._monitor_duration = int(config.get("monitor_duration", 30))
+            self._monitor_interval = int(config.get("monitor_interval", 3))
             
             logger.info(f"【QB种子优化】配置加载完成:")
             logger.info(f"  - 启用状态: {self._enabled}")
@@ -157,6 +161,8 @@ class QbOptimizer(_PluginBase):
             logger.info(f"  - I/O缓存阈值: {self._io_cache_threshold}%")
             logger.info(f"  - I/O队列阈值: {self._io_queue_threshold}")
             logger.info(f"  - 速度限制: {self._speed_limit_mbps}MB/s")
+            logger.info(f"  - 监测时长: {self._monitor_duration}秒")
+            logger.info(f"  - 监测间隔: {self._monitor_interval}秒")
         else:
             logger.warning("【QB种子优化】未收到配置，使用默认值")
 
@@ -209,6 +215,8 @@ class QbOptimizer(_PluginBase):
                     "io_cache_threshold": self._io_cache_threshold,
                     "io_queue_threshold": self._io_queue_threshold,
                     "speed_limit_mbps": self._speed_limit_mbps,
+                    "monitor_duration": self._monitor_duration,
+                    "monitor_interval": self._monitor_interval,
                 }
                 logger.info(f"【QB种子优化】保存配置: {config_to_save}")
                 self.update_config(config_to_save)
@@ -1329,11 +1337,15 @@ class QbOptimizer(_PluginBase):
             logger.debug(f"【功能4-磁盘监控】单次检查异常: {str(e)}")
             return None
 
-    def _continuous_monitor_system(self, qb_client, monitor_count=5, monitor_interval=2):
+    def _continuous_monitor_system(self, qb_client, monitor_duration=30, monitor_interval=3):
         """
         持续监测系统状态，确保决策稳定性
         """
-        logger.info(f"【功能4-磁盘监控】开始持续监测 {monitor_count * monitor_interval} 秒，每 {monitor_interval} 秒检查一次")
+        # 计算监测次数
+        monitor_count = max(1, monitor_duration // monitor_interval)
+        actual_duration = monitor_count * monitor_interval
+        
+        logger.info(f"【功能4-磁盘监控】开始持续监测 {actual_duration} 秒，每 {monitor_interval} 秒检查一次，共 {monitor_count} 次")
         
         monitor_results = []
         
@@ -1409,7 +1421,7 @@ class QbOptimizer(_PluginBase):
                 return False
             
             # 持续监测系统状态
-            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(qb_client)
+            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(qb_client, self._monitor_duration, self._monitor_interval)
             
             if final_should_limit is None:
                 logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
@@ -2481,6 +2493,51 @@ class QbOptimizer(_PluginBase):
                                     {
                                         'component': 'VTextField',
                                         'props': {
+                                            'model': 'monitor_duration',
+                                            'label': '持续监测时长（秒）',
+                                            'placeholder': '30',
+                                            'type': 'number',
+                                            'min': 10,
+                                            'max': 300
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'monitor_interval',
+                                            'label': '监测间隔（秒）',
+                                            'placeholder': '3',
+                                            'type': 'number',
+                                            'min': 1,
+                                            'max': 30
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
                                             'model': 'io_cache_threshold',
                                             'label': 'I/O缓存阈值（%）',
                                             'placeholder': '70',
@@ -2653,6 +2710,8 @@ class QbOptimizer(_PluginBase):
             "io_cache_threshold": 70,
             "io_queue_threshold": 8000,
             "speed_limit_mbps": 1,
+            "monitor_duration": 30,
+            "monitor_interval": 3,
         }
 
     def get_page(self) -> List[dict]:
