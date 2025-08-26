@@ -12,7 +12,7 @@ from app.schemas import TransferInfo, RefreshMediaItem, ServiceInfo
 from app.schemas.types import EventType
 
 
-class Lego9MediaServerRefresh(_PluginBase):
+class MediaServerRefresh(_PluginBase):
     # 插件名称
     plugin_name = "媒体库服务器刷新"
     # 插件描述

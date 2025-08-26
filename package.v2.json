@@ -10,7 +10,8 @@
     "history": {
       "v1.0": "首个版本，实现种子优化功能"
     }
-  },"GDCloudLinkMonitor": {
+  },
+  "GDCloudLinkMonitor": {
     "name": "多目录实时监控",
     "description": "监控云盘目录文件变化，自动转移媒体文件，支持轮询分发和网盘限制检测。",
     "labels": "云盘,工具",
@@ -23,7 +24,7 @@
       "v2.8.1": "修复路径匹配问题，添加挂载路径映射配置"
     }
   },
-  "Lego9MediaServerRefresh": {
+  "MediaServerRefresh": {
     "name": "媒体库服务器刷新",
     "description": "入库后自动刷新Emby/Jellyfin/Plex服务器海报墙。",
     "labels": "媒体库",
