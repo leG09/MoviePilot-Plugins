@@ -12,7 +12,7 @@ from app.schemas import TransferInfo, RefreshMediaItem, ServiceInfo
 from app.schemas.types import EventType
 
 
-class MediaServerRefresh(_PluginBase):
+class XGMediaServerRefresh(_PluginBase):
     # 插件名称
     plugin_name = "媒体库服务器刷新"
     # 插件描述
@@ -26,7 +26,7 @@ class MediaServerRefresh(_PluginBase):
     # 作者主页
     author_url = "https://github.com/leG09"
     # 插件配置项ID前缀
-    plugin_config_prefix = "lego9_mediaserverrefresh_"
+    plugin_config_prefix = "xg_mediaserverrefresh_"
     # 加载顺序
     plugin_order = 14
     # 可使用的用户级别

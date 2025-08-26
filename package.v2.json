@@ -24,7 +24,7 @@
       "v2.8.1": "修复路径匹配问题，添加挂载路径映射配置"
     }
   },
-  "MediaServerRefresh": {
+  "XGMediaServerRefresh": {
     "name": "媒体库服务器刷新",
     "description": "入库后自动刷新Emby/Jellyfin/Plex服务器海报墙。",
     "labels": "媒体库",
