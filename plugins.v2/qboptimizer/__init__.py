@@ -1448,6 +1448,14 @@ class QbOptimizer(_PluginBase):
                 logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
                 return False
             
+            # 重新获取当前的速度限制设置（因为在监测前可能已经临时解除限速）
+            try:
+                current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
+                logger.info(f"【功能4-磁盘监控】监测后当前速度限制 - 下载: {current_download_limit}KB/s, 上传: {current_upload_limit}KB/s")
+            except Exception as e:
+                logger.warning(f"【功能4-磁盘监控】重新获取当前速度限制失败: {str(e)}")
+                current_download_limit, current_upload_limit = 0, 0
+            
             if final_should_limit and current_download_limit == 0:
                 # 需要限速且当前未限速
                 logger.warning(f"【功能4-磁盘监控】持续监测确认系统资源不足，开始限制下载速度")
