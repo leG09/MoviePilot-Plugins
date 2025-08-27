@@ -36,5 +36,17 @@
       "v1.4.1":"增加目录映射",
       "v1.3.3": "优化延迟刷新"
     }
+  },
+  "WebhookEmby": {
+    "name": "Emby入库Webhook",
+    "description": "通过Webhook接收文件路径并触发刮削和入库通知，适用于文件已在正确位置的场景。",
+    "labels": "媒体库,Webhook",
+    "version": "1.0",
+    "icon": "Emby_A.png",
+    "author": "leGO9",
+    "level": 1,
+    "history": {
+      "v1.0": "首个版本，实现Emby入库Webhook功能"
+    }
   }
 }
