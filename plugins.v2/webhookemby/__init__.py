@@ -10,10 +10,12 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.chain.transfer import TransferChain
 from app.chain.media import MediaChain
+from app.chain.mediaserver import MediaServerChain
 from app.core.meta import MetaBase
 from app.core.context import MediaInfo
 from app.core.metainfo import MetaInfoPath
 from app.schemas import FileItem, TransferTask, TransferInfo, Notification
+from app.schemas.mediaserver import RefreshMediaItem
 from app.schemas.types import MediaType, EventType, NotificationType
 
 
@@ -175,7 +177,7 @@ class WebhookEmby(_PluginBase):
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'warning',
-                                            'text': '请求格式：POST {"file_path": "/path/to/your/file", "apikey": "your_api_key"}，apikey参数可选'
+                                            'text': '请求格式：POST ?apikey=your_api_key&file_path=/path/to/your/file（参数通过查询字符串传递）'
                                         }
                                     }
                                 ]
@@ -228,7 +230,7 @@ class WebhookEmby(_PluginBase):
 
             logger.info(f"接收到Emby入库请求：{file_path}")
 
-            # 创建FileItem对象
+            # 创建FileItem对象（指向具体文件）
             fileitem = FileItem(
                 storage="local",
                 path=str(path),
@@ -263,8 +265,9 @@ class WebhookEmby(_PluginBase):
         :return: 处理结果
         """
         try:
-            # 获取TransferChain实例
+            # 获取处理链实例
             transfer_chain = TransferChain()
+            mediaserver_chain = MediaServerChain()
             
             # 首先识别媒体信息
             file_path = Path(fileitem.path)
@@ -290,18 +293,39 @@ class WebhookEmby(_PluginBase):
             
             logger.info(f"文件 {fileitem.name} 识别为：{mediainfo.title_year}")
             
-            # 发送刮削事件 - 让Emby等媒体服务器刮削元数据
+            # 发送刮削事件 - 使用父目录作为根，传入完整文件路径列表，并强制覆盖
             try:
+                parent = file_path.parent if file_path.is_file() else file_path
+                parent_item = FileItem(
+                    storage=fileitem.storage,
+                    path=str(parent),
+                    type="dir",
+                    name=parent.name
+                )
                 eventmanager.send_event(EventType.MetadataScrape, {
                     'meta': meta,
                     'mediainfo': mediainfo,
-                    'fileitem': fileitem,
-                    'file_list': [fileitem.name],
-                    'overwrite': False
+                    'fileitem': parent_item,
+                    'file_list': [str(file_path)],
+                    'overwrite': True
                 })
                 logger.info(f"已发送刮削事件：{fileitem.name}")
             except Exception as e:
                 logger.warning(f"发送刮削事件失败：{str(e)}")
+
+            # 刷新Emby媒体库（按定位库与对象刷新）
+            try:
+                refresh_item = RefreshMediaItem(
+                    title=mediainfo.title,
+                    year=str(mediainfo.year) if mediainfo.year else None,
+                    type=mediainfo.type,
+                    category=mediainfo.category,
+                    target_path=str(parent)
+                )
+                mediaserver_chain.refresh_library_by_items([refresh_item])
+                logger.info("已触发Emby媒体库刷新")
+            except Exception as e:
+                logger.warning(f"触发Emby媒体库刷新失败：{str(e)}")
             
             # 发送入库通知（如果启用）
             if self._send_notification:
