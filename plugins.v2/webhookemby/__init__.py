@@ -1,10 +1,11 @@
-from typing import Any, List, Dict, Tuple, Optional, Union
+from typing import Any, List, Dict, Tuple, Optional, Union, Annotated
 from pathlib import Path
 import traceback
 
 from app import schemas
 from app.core.config import settings
 from app.core.event import eventmanager
+from app.core.security import verify_apikey
 from app.log import logger
 from app.plugins import _PluginBase
 from app.chain.transfer import TransferChain
@@ -195,11 +196,11 @@ class WebhookEmby(_PluginBase):
         """
         pass
 
-    def emby_webhook(self, file_path: str, apikey: str = None) -> Dict[str, Any]:
+    def emby_webhook(self, file_path: str, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
         Emby入库Webhook接口
         :param file_path: 文件路径
-        :param apikey: API密钥（可选）
+        :param apikey: API密钥（由MoviePilot系统验证）
         :return: 处理结果
         """
         try:
@@ -209,11 +210,6 @@ class WebhookEmby(_PluginBase):
                     "success": False,
                     "message": "插件未启用"
                 }
-
-            # API密钥验证由MoviePilot系统处理，这里不需要额外验证
-            # 如果配置了自定义API密钥，记录日志
-            if self._api_token and apikey != self._api_token:
-                logger.warning(f"使用的API密钥与配置的不匹配")
 
             # 检查文件路径
             if not file_path:
