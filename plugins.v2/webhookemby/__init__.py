@@ -174,7 +174,7 @@ class WebhookEmby(_PluginBase):
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'warning',
-                                            'text': '请求格式：POST {"file_path": "/path/to/your/file", "token": "your_token"}，token参数可选'
+                                            'text': '请求格式：POST {"file_path": "/path/to/your/file", "apikey": "your_api_key"}，apikey参数可选'
                                         }
                                     }
                                 ]
@@ -195,11 +195,11 @@ class WebhookEmby(_PluginBase):
         """
         pass
 
-    def emby_webhook(self, file_path: str, token: str = None) -> Dict[str, Any]:
+    def emby_webhook(self, file_path: str, apikey: str = None) -> Dict[str, Any]:
         """
         Emby入库Webhook接口
         :param file_path: 文件路径
-        :param token: 访问令牌（可选）
+        :param apikey: API密钥（可选）
         :return: 处理结果
         """
         try:
@@ -210,13 +210,10 @@ class WebhookEmby(_PluginBase):
                     "message": "插件未启用"
                 }
 
-            # 验证Token
-            expected_token = self._api_token if self._api_token else settings.API_TOKEN
-            if token and token != expected_token:
-                return {
-                    "success": False,
-                    "message": "Token验证失败"
-                }
+            # API密钥验证由MoviePilot系统处理，这里不需要额外验证
+            # 如果配置了自定义API密钥，记录日志
+            if self._api_token and apikey != self._api_token:
+                logger.warning(f"使用的API密钥与配置的不匹配")
 
             # 检查文件路径
             if not file_path:
