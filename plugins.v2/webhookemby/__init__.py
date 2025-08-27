@@ -318,11 +318,12 @@ class WebhookEmby(_PluginBase):
                 refresh_item = RefreshMediaItem(
                     title=mediainfo.title,
                     year=str(mediainfo.year) if mediainfo.year else None,
-                    type=mediainfo.type,
+                    type=mediainfo.type.value if mediainfo.type else None,
                     category=mediainfo.category,
                     target_path=str(parent)
                 )
-                mediaserver_chain.refresh_library_by_items([refresh_item])
+                # 通过处理链调用模块方法
+                mediaserver_chain.run_module("refresh_library_by_items", items=[refresh_item])
                 logger.info("已触发Emby媒体库刷新")
             except Exception as e:
                 logger.warning(f"触发Emby媒体库刷新失败：{str(e)}")
@@ -355,6 +356,7 @@ class WebhookEmby(_PluginBase):
             else:
                 logger.info("入库通知已禁用，跳过发送通知")
             
+            se_str = None if (mediainfo.type != MediaType.TV or not meta) else (se_str if 'se_str' in locals() else None)
             return {
                 "success": True,
                 "message": f"文件 {fileitem.name} 入库处理完成（已发送刮削事件和通知）",
