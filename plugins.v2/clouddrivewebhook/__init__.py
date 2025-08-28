@@ -83,7 +83,7 @@ class CloudDriveWebhook(_PluginBase):
                 "endpoint": self.clouddrive_webhook,
                 "methods": ["POST"],
                 "summary": "CloudDrive目录刷新Webhook",
-                "description": "接收文件路径，通过gRPC直接刷新该文件所在的上一级目录"
+                "description": "接收JSON格式的文件列表，通过gRPC直接刷新文件所在的上一级目录。支持批量处理多个文件路径。"
             },
             {
                 "path": "/test_connection",
@@ -337,8 +337,11 @@ class CloudDriveWebhook(_PluginBase):
                                 # 清空该目录的请求队列
                                 self._refresh_queue[directory].clear()
                 
+                # 合并重合的目录
+                merged_directories = self._merge_overlapping_directories(directories_to_refresh, directory_files)
+                
                 # 执行刷新
-                for directory in directories_to_refresh:
+                for directory in merged_directories:
                     try:
                         logger.info(f"执行合并刷新: {directory}")
                         result = self._refresh_directory_via_grpc(directory)
@@ -360,6 +363,57 @@ class CloudDriveWebhook(_PluginBase):
             except Exception as e:
                 logger.error(f"刷新工作线程发生错误: {str(e)}")
                 time.sleep(5)  # 发生错误时等待更长时间
+
+    def _merge_overlapping_directories(self, directories: list, directory_files: dict) -> list:
+        """
+        合并重合的目录，只保留最顶层的目录
+        
+        Args:
+            directories: 要刷新的目录列表
+            directory_files: 每个目录对应的文件信息
+            
+        Returns:
+            list: 合并后的目录列表
+        """
+        if not directories:
+            return []
+        
+        logger.info(f"开始合并重合目录，原始目录列表: {directories}")
+        
+        # 按路径长度排序，确保父目录在前
+        sorted_directories = sorted(directories, key=lambda x: len(x.split('/')))
+        
+        merged_directories = []
+        merged_files = {}
+        
+        for directory in sorted_directories:
+            # 检查当前目录是否已经被其他目录包含
+            is_contained = False
+            for existing_dir in merged_directories:
+                if directory.startswith(existing_dir + '/') or directory == existing_dir:
+                    is_contained = True
+                    # 将当前目录的文件信息合并到父目录
+                    if directory in directory_files:
+                        if existing_dir not in merged_files:
+                            merged_files[existing_dir] = []
+                        merged_files[existing_dir].extend(directory_files[directory])
+                        logger.info(f"目录 {directory} 被 {existing_dir} 包含，文件信息已合并")
+                    break
+            
+            if not is_contained:
+                merged_directories.append(directory)
+                if directory in directory_files:
+                    merged_files[directory] = directory_files[directory]
+                logger.info(f"添加独立目录: {directory}")
+        
+        # 更新directory_files为合并后的结果
+        directory_files.clear()
+        directory_files.update(merged_files)
+        
+        logger.info(f"目录合并完成，最终目录列表: {merged_directories}")
+        logger.info(f"合并后的文件信息: {list(directory_files.keys())}")
+        
+        return merged_directories
 
     def _map_file_path(self, file_path: str) -> tuple[str, bool]:
         """
@@ -410,69 +464,124 @@ class CloudDriveWebhook(_PluginBase):
             logger.info(f"最终映射路径: {mapped_path}")
             return mapped_path, True
 
-    def clouddrive_webhook(self, file_path: str, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
+    def clouddrive_webhook(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
         CloudDrive目录刷新Webhook
         
         Args:
-            file_path: 文件路径
+            request_data: 请求数据，包含data数组，每个元素有source_file字段
             apikey: API密钥（通过query参数或X-API-KEY头传递）
             
         Returns:
             Dict: 处理结果
         """
         try:
-            logger.info(f"接收到CloudDrive刷新请求：{file_path}")
+            logger.info(f"接收到CloudDrive刷新请求：{request_data}")
             
-            # 验证文件路径
-            if not file_path or not file_path.strip():
-                return {"success": False, "message": "文件路径不能为空"}
+            # 验证请求数据
+            if not request_data or not isinstance(request_data, dict):
+                return {"success": False, "message": "请求数据格式错误"}
             
-            # 映射文件路径
-            logger.info(f"原始文件路径: {file_path}")
-            mapped_file_path, mapping_success = self._map_file_path(file_path.strip())
-            logger.info(f"映射后文件路径: {mapped_file_path}")
+            # 获取data数组
+            data = request_data.get("data", [])
+            if not data or not isinstance(data, list):
+                return {"success": False, "message": "data字段为空或格式错误"}
             
-            # 如果路径映射失败，则不处理
-            if not mapping_success:
-                logger.info(f"路径映射失败，跳过处理: {file_path}")
-                return {
-                    "success": True,
-                    "message": f"路径映射失败，跳过处理",
-                    "skipped": True,
-                    "reason": "path_mapping_failed"
-                }
+            logger.info(f"接收到 {len(data)} 个文件路径")
             
-            # 获取文件路径对象
-            file_path_obj = Path(mapped_file_path)
+            # 处理每个文件路径
+            processed_files = []
+            skipped_files = []
+            failed_files = []
             
-            # 获取上一级目录
-            parent_dir = file_path_obj.parent
-            if not parent_dir or str(parent_dir) == ".":
-                return {"success": False, "message": "无法获取有效的上级目录"}
+            for i, item in enumerate(data):
+                try:
+                    # 获取source_file字段
+                    source_file = item.get("source_file", "")
+                    if not source_file:
+                        logger.warning(f"第 {i+1} 个文件缺少source_file字段: {item}")
+                        failed_files.append({"index": i, "reason": "missing_source_file"})
+                        continue
+                    
+                    logger.info(f"处理第 {i+1} 个文件: {source_file}")
+                    
+                    # 映射文件路径
+                    mapped_file_path, mapping_success = self._map_file_path(source_file.strip())
+                    
+                    # 如果路径映射失败，则跳过
+                    if not mapping_success:
+                        logger.info(f"路径映射失败，跳过处理: {source_file}")
+                        skipped_files.append({
+                            "index": i,
+                            "source_file": source_file,
+                            "reason": "path_mapping_failed"
+                        })
+                        continue
+                    
+                    # 获取文件路径对象
+                    file_path_obj = Path(mapped_file_path)
+                    
+                    # 获取上一级目录
+                    parent_dir = file_path_obj.parent
+                    if not parent_dir or str(parent_dir) == ".":
+                        logger.warning(f"无法获取有效的上级目录: {mapped_file_path}")
+                        failed_files.append({
+                            "index": i,
+                            "source_file": source_file,
+                            "reason": "invalid_parent_directory"
+                        })
+                        continue
+                    
+                    parent_dir_str = str(parent_dir)
+                    
+                    # 添加到刷新队列
+                    with self._refresh_lock:
+                        self._refresh_queue[parent_dir_str].append({
+                            'timestamp': time.time(),
+                            'original_path': source_file,
+                            'mapped_path': mapped_file_path
+                        })
+                    
+                    processed_files.append({
+                        "index": i,
+                        "source_file": source_file,
+                        "mapped_file": mapped_file_path,
+                        "parent_directory": parent_dir_str
+                    })
+                    
+                    logger.info(f"文件 {source_file} 已加入刷新队列，父目录: {parent_dir_str}")
+                    
+                except Exception as e:
+                    logger.error(f"处理第 {i+1} 个文件时发生错误: {str(e)}")
+                    failed_files.append({
+                        "index": i,
+                        "source_file": item.get("source_file", ""),
+                        "reason": "processing_error",
+                        "error": str(e)
+                    })
             
-            parent_dir_str = str(parent_dir)
-            logger.info(f"准备刷新目录：{parent_dir_str}")
+            # 统计结果
+            total_files = len(data)
+            success_count = len(processed_files)
+            skipped_count = len(skipped_files)
+            failed_count = len(failed_files)
             
-            # 添加到刷新队列
-            logger.info(f"准备将目录 {parent_dir_str} 添加到刷新队列")
-            with self._refresh_lock:
-                self._refresh_queue[parent_dir_str].append({
-                    'timestamp': time.time(),
-                    'original_path': file_path,
-                    'mapped_path': mapped_file_path
-                })
-                logger.info(f"目录 {parent_dir_str} 已添加到刷新队列，当前队列长度: {len(self._refresh_queue[parent_dir_str])}")
+            logger.info(f"处理完成 - 总计: {total_files}, 成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count}")
             
             # 注意：通知将在目录刷新完成后发送
             
             return {
                 "success": True,
-                "message": f"目录 {parent_dir_str} 已加入刷新队列",
-                "queued_directory": parent_dir_str,
-                "original_file": file_path,
-                "mapped_file": mapped_file_path,
-                "path_mapping_applied": mapped_file_path != file_path
+                "message": f"批量处理完成 - 总计: {total_files}, 成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count}",
+                "summary": {
+                    "total_files": total_files,
+                    "success_count": success_count,
+                    "skipped_count": skipped_count,
+                    "failed_count": failed_count
+                },
+                "processed_files": processed_files,
+                "skipped_files": skipped_files,
+                "failed_files": failed_files
             }
                 
         except Exception as e:
