@@ -1,4 +1,3 @@
-import logging
 import grpc
 import threading
 import time
@@ -21,8 +20,7 @@ from app.chain.transfer import TransferChain
 from app.chain.media import MediaChain
 from app.core.metainfo import MetaInfoPath
 from app.schemas.types import MediaType
-
-logger = logging.getLogger(__name__)
+from app.log import logger
 
 
 class CloudDriveWebhook(_PluginBase):
@@ -892,10 +890,18 @@ class CloudDriveWebhook(_PluginBase):
                 if file_path_to_check:
                     # 根据配置决定是否检查文件存在
                     if self._check_file_exists:
-                        # 通过gRPC检查文件是否存在，最多重试3次
+                        # 先刷新多个层级目录，然后检查文件是否存在，最多重试3次
                         file_exists = False
                         for retry_count in range(3):
-                            file_exists = self._check_file_exists_via_grpc(file_path_to_check)
+                            # 刷新多个层级目录
+                            refresh_success = self._refresh_multiple_directories(file_path_to_check)
+                            
+                            if refresh_success:
+                                logger.info(f"目录刷新成功，开始检查文件: {file_path_to_check}")
+                                file_exists = self._check_file_exists_via_grpc(file_path_to_check)
+                            else:
+                                logger.warning(f"目录刷新失败")
+                                file_exists = False
                             
                             if file_exists:
                                 logger.info(f"文件存在，发送通知: {file_path_to_check}")
@@ -916,6 +922,128 @@ class CloudDriveWebhook(_PluginBase):
                     
         except Exception as e:
             logger.error(f"发送文件通知时发生错误: {str(e)}")
+
+    def _refresh_multiple_directories(self, file_path: str) -> bool:
+        """
+        刷新多个层级目录
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            bool: 是否成功刷新所有目录
+        """
+        try:
+            logger.info(f"=== 开始刷新多个层级目录 ===")
+            logger.info(f"文件路径: {file_path}")
+            
+            # 从路径映射配置中获取目标路径前缀
+            target_path_prefix = self._get_target_path_prefix(file_path)
+            if not target_path_prefix:
+                logger.warning(f"无法从路径映射配置中获取目标路径前缀")
+                return False
+            
+            logger.info(f"从路径映射获取的目标路径前缀: {target_path_prefix}")
+            
+            # 解析路径，获取需要刷新的目录层级
+            path_parts = Path(file_path).parts
+            
+            # 找到目标路径前缀的位置
+            prefix_parts = Path(target_path_prefix).parts
+            prefix_index = -1
+            
+            # 在文件路径中查找目标路径前缀
+            for i in range(len(path_parts) - len(prefix_parts) + 1):
+                if path_parts[i:i+len(prefix_parts)] == prefix_parts:
+                    prefix_index = i
+                    break
+            
+            if prefix_index == -1:
+                logger.warning(f"无法在文件路径中找到目标路径前缀: {target_path_prefix}")
+                return False
+            
+            logger.info(f"找到目标路径前缀位置: {prefix_index}")
+            
+            # 构建需要刷新的目录列表
+            directories_to_refresh = []
+            
+            # 从目标路径前缀开始，逐级构建目录
+            current_path = target_path_prefix
+            directories_to_refresh.append(current_path)
+            
+            # 逐级添加子目录
+            for i in range(len(prefix_parts), len(path_parts) - 1):  # -1 是因为最后一个是文件名
+                current_path = f"{current_path}/{path_parts[i]}"
+                directories_to_refresh.append(current_path)
+            
+            logger.info(f"需要刷新的目录列表: {directories_to_refresh}")
+            
+            # 逐个刷新目录
+            all_success = True
+            for directory in directories_to_refresh:
+                logger.info(f"刷新目录: {directory}")
+                refresh_result = self._refresh_directory_via_grpc(directory)
+                
+                if refresh_result["success"]:
+                    logger.info(f"✓ 目录刷新成功: {directory}")
+                else:
+                    logger.warning(f"✗ 目录刷新失败: {directory} - {refresh_result['message']}")
+                    all_success = False
+            
+            logger.info(f"多层级目录刷新完成，总体结果: {'成功' if all_success else '失败'}")
+            return all_success
+            
+        except Exception as e:
+            logger.error(f"刷新多层级目录时发生错误: {str(e)}")
+            import traceback
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
+            return False
+
+    def _get_target_path_prefix(self, file_path: str) -> str:
+        """
+        从路径映射配置中获取目标路径前缀
+        
+        Args:
+            file_path: 文件路径，用于确定使用哪个映射规则
+            
+        Returns:
+            str: 目标路径前缀，如果获取失败则返回空字符串
+        """
+        try:
+            if not self._path_mappings:
+                logger.warning(f"未配置路径映射")
+                return ""
+            
+            logger.info(f"解析路径映射配置: {self._path_mappings}")
+            logger.info(f"查找文件路径对应的目标路径前缀: {file_path}")
+            
+            # 解析路径映射配置
+            for line in self._path_mappings.strip().split('\n'):
+                line = line.strip()
+                if not line or '=>' not in line:
+                    continue
+                
+                try:
+                    source_path, target_path = line.split('=>', 1)
+                    source_path = source_path.strip()
+                    target_path = target_path.strip()
+                    
+                    logger.info(f"检查映射规则: {source_path} => {target_path}")
+                    
+                    # 检查文件路径是否匹配这个目标路径
+                    if file_path.startswith(target_path):
+                        logger.info(f"找到匹配的目标路径: {target_path}")
+                        return target_path
+                        
+                except Exception as e:
+                    logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
+            
+            logger.warning(f"未找到匹配文件路径 {file_path} 的目标路径")
+            return ""
+            
+        except Exception as e:
+            logger.error(f"获取目标路径前缀时发生错误: {str(e)}")
+            return ""
 
     def _check_file_exists_via_grpc(self, file_path: str) -> bool:
         """
