@@ -321,55 +321,54 @@ class GDCloudLinkMonitor(_PluginBase):
         
         logger.debug(f"开始检查云盘错误，日志路径：{self._log_path}")
         
-        # 检查今天和昨天的日志文件
-        for days_ago in range(2):
-            date = datetime.date.today() - datetime.timedelta(days=days_ago)
-            log_file = self._get_log_file_path(date)
-            
-            logger.debug(f"检查日志文件（{days_ago}天前）：{log_file}")
-            
-            if not log_file:
-                logger.debug("日志文件路径为空，跳过")
-                continue
-                
-            if not log_file.exists():
-                logger.debug(f"日志文件不存在：{log_file}")
-                continue
-                
-            try:
-                file_size = log_file.stat().st_size
-                logger.debug(f"日志文件大小：{file_size} bytes")
-                
-                with open(log_file, 'r', encoding='utf-8') as f:
-                    # 只读取最近的内容，避免处理过大的日志文件
-                    start_pos = max(0, file_size - 1024 * 1024)  # 读取最后1MB
-                    f.seek(start_pos)
-                    content = f.read()
-                    
-                logger.debug(f"读取了 {len(content)} 字符的日志内容")
-                    
-                # 查找网盘限制错误
-                error_patterns = [
-                    r'upload error for (/[^/]+)/.*User rate limit exceeded',
-                    r'upload error for (/[^/]+)/.*quota.*exceeded',
-                    r'upload error for (/[^/]+)/.*403.*exceeded'
-                ]
-                
-                for i, pattern in enumerate(error_patterns):
-                    matches = re.findall(pattern, content, re.IGNORECASE)
-                    logger.debug(f"模式 {i+1} 匹配到 {len(matches)} 个错误")
-                    
-                    for mount_path in matches:
-                        if mount_path not in error_counts:
-                            error_counts[mount_path] = 0
-                        error_counts[mount_path] += 1
-                        logger.debug(f"挂载路径 {mount_path} 错误计数增加到 {error_counts[mount_path]}")
-                        
-            except Exception as e:
-                logger.warning(f"检查日志文件 {log_file} 时出错: {e}")
-                import traceback
-                logger.debug(f"错误详情: {traceback.format_exc()}")
+        # 只检查今天的日志文件
+        date = datetime.date.today()
+        log_file = self._get_log_file_path(date)
         
+        logger.debug(f"检查今天的日志文件：{log_file}")
+            
+        if not log_file:
+            logger.debug("日志文件路径为空，跳过")
+            return error_counts
+                
+        if not log_file.exists():
+            logger.debug(f"日志文件不存在：{log_file}")
+            return error_counts
+                
+        try:
+            file_size = log_file.stat().st_size
+            logger.debug(f"日志文件大小：{file_size} bytes")
+            
+            with open(log_file, 'r', encoding='utf-8') as f:
+                # 只读取最近的内容，避免处理过大的日志文件
+                start_pos = max(0, file_size - 1024 * 1024)  # 读取最后1MB
+                f.seek(start_pos)
+                content = f.read()
+                
+            logger.debug(f"读取了 {len(content)} 字符的日志内容")
+                
+            # 查找网盘限制错误
+            error_patterns = [
+                r'upload error for (/[^/]+)/.*User rate limit exceeded',
+                r'upload error for (/[^/]+)/.*quota.*exceeded',
+                r'upload error for (/[^/]+)/.*403.*exceeded'
+            ]
+            
+            for i, pattern in enumerate(error_patterns):
+                matches = re.findall(pattern, content, re.IGNORECASE)
+                logger.debug(f"模式 {i+1} 匹配到 {len(matches)} 个错误")
+                
+                for mount_path in matches:
+                    if mount_path not in error_counts:
+                        error_counts[mount_path] = 0
+                    error_counts[mount_path] += 1
+                    logger.debug(f"挂载路径 {mount_path} 错误计数增加到 {error_counts[mount_path]}")
+                    
+        except Exception as e:
+            logger.warning(f"检查日志文件 {log_file} 时出错: {e}")
+            import traceback
+            logger.debug(f"错误详情: {traceback.format_exc()}")
+    
         logger.info(f"日志检查完成，错误统计：{error_counts}")        
         return error_counts
 
