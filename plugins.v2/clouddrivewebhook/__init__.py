@@ -500,11 +500,14 @@ class CloudDriveWebhook(_PluginBase):
                 return True, "使用缓存的登录状态"
             
             # 如果缓存过期，先尝试检查服务器端登录状态
+            logger.info("缓存已过期，检查服务器端登录状态")
             if self._check_server_login_status():
                 logger.info("服务器端显示已登录，更新本地状态")
                 self._token = "logged_in"
                 self._login_time = current_time
                 return True, "服务器端已登录"
+            else:
+                logger.info("服务器端显示未登录，需要重新登录")
             
             with self._login_lock:
                 # 双重检查，避免重复登录
@@ -525,11 +528,14 @@ class CloudDriveWebhook(_PluginBase):
                     return False, "无法创建gRPC连接"
                 
                 # 再次检查服务器端登录状态（在锁内）
+                logger.info("在锁内再次检查服务器端登录状态")
                 if self._check_server_login_status():
                     logger.info("服务器端显示已登录，跳过登录步骤")
                     self._token = "logged_in"
                     self._login_time = current_time
                     return True, "服务器端已登录"
+                else:
+                    logger.info("服务器端显示未登录，继续登录流程")
                 
                 # 导入protobuf消息
                 try:
@@ -550,21 +556,27 @@ class CloudDriveWebhook(_PluginBase):
                 # 调用登录API
                 response = stub.Login(login_request)
                 
+                logger.info(f"登录响应: success={response.success}, errorMessage={getattr(response, 'errorMessage', 'N/A')}")
+                
                 if response.success:
                     self._token = "logged_in"  # 简化token管理
                     self._login_time = current_time
                     logger.info("CloudDrive登录成功")
                     return True, "登录成功"
                 else:
+                    # 获取错误消息
+                    error_message = getattr(response, 'errorMessage', 'Unknown error')
+                    logger.info(f"登录失败，错误消息: {error_message}")
+                    
                     # 检查是否是"已经登录"的情况
-                    if "already login" in response.errorMessage.lower() or "already logged in" in response.errorMessage.lower():
+                    if "already login" in error_message.lower() or "already logged in" in error_message.lower():
                         logger.info("CloudDrive已经登录，使用现有会话")
                         self._token = "logged_in"
                         self._login_time = current_time
                         return True, "已经登录"
                     else:
-                        logger.error(f"CloudDrive登录失败: {response.errorMessage}")
-                        return False, response.errorMessage
+                        logger.error(f"CloudDrive登录失败: {error_message}")
+                        return False, error_message
                     
         except Exception as e:
             logger.error(f"登录CloudDrive时发生错误: {str(e)}")
