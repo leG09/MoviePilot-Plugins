@@ -363,7 +363,7 @@ class CloudDriveWebhook(_PluginBase):
                 logger.error(f"刷新工作线程发生错误: {str(e)}")
                 time.sleep(5)  # 发生错误时等待更长时间
 
-    def _map_file_path(self, file_path: str) -> str:
+    def _map_file_path(self, file_path: str) -> tuple[str, bool]:
         """
         映射文件路径
         
@@ -371,11 +371,11 @@ class CloudDriveWebhook(_PluginBase):
             file_path: 原始文件路径
             
         Returns:
-            str: 映射后的文件路径
+            tuple: (映射后的文件路径, 是否成功映射)
         """
         if not self._path_mappings:
             logger.info(f"未配置路径映射，使用原始路径: {file_path}")
-            return file_path
+            return file_path, True
         
         mapped_path = file_path
         logger.info(f"开始路径映射，原始路径: {file_path}")
@@ -406,11 +406,11 @@ class CloudDriveWebhook(_PluginBase):
                 logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
         
         if not mapping_applied:
-            logger.warning(f"路径映射失败，使用原始路径: {file_path}")
+            logger.warning(f"路径映射失败，跳过处理: {file_path}")
+            return file_path, False
         else:
             logger.info(f"最终映射路径: {mapped_path}")
-        
-        return mapped_path
+            return mapped_path, True
 
     def clouddrive_webhook(self, file_path: str, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
@@ -432,8 +432,18 @@ class CloudDriveWebhook(_PluginBase):
             
             # 映射文件路径
             logger.info(f"原始文件路径: {file_path}")
-            mapped_file_path = self._map_file_path(file_path.strip())
+            mapped_file_path, mapping_success = self._map_file_path(file_path.strip())
             logger.info(f"映射后文件路径: {mapped_file_path}")
+            
+            # 如果路径映射失败，则不处理
+            if not mapping_success:
+                logger.info(f"路径映射失败，跳过处理: {file_path}")
+                return {
+                    "success": True,
+                    "message": f"路径映射失败，跳过处理",
+                    "skipped": True,
+                    "reason": "path_mapping_failed"
+                }
             
             # 获取文件路径对象
             file_path_obj = Path(mapped_file_path)
@@ -876,19 +886,27 @@ class CloudDriveWebhook(_PluginBase):
                 original_file_path = file_info.get('original_path', '')
                 
                 # 优先使用映射路径，如果不存在则使用原始路径
+                # 注意：这里mapped_file_path已经确保是有效的，因为映射失败的文件不会进入队列
                 file_path_to_check = mapped_file_path if mapped_file_path else original_file_path
                 
                 if file_path_to_check:
                     # 根据配置决定是否检查文件存在
                     if self._check_file_exists:
-                        # 通过gRPC检查文件是否存在
-                        file_exists = self._check_file_exists_via_grpc(file_path_to_check)
-                        
-                        if file_exists:
-                            logger.info(f"文件存在，发送通知: {file_path_to_check}")
-                            self._send_refresh_notification(file_path_to_check)
-                        else:
-                            logger.warning(f"文件不存在，跳过通知: {file_path_to_check}")
+                        # 通过gRPC检查文件是否存在，最多重试3次
+                        file_exists = False
+                        for retry_count in range(3):
+                            file_exists = self._check_file_exists_via_grpc(file_path_to_check)
+                            
+                            if file_exists:
+                                logger.info(f"文件存在，发送通知: {file_path_to_check}")
+                                self._send_refresh_notification(file_path_to_check)
+                                break
+                            else:
+                                if retry_count < 2:  # 不是最后一次重试
+                                    logger.info(f"文件不存在，等待5秒后重试 ({retry_count + 1}/3): {file_path_to_check}")
+                                    time.sleep(5)  # 等待5秒后重试
+                                else:
+                                    logger.warning(f"文件不存在，跳过通知 (已重试3次): {file_path_to_check}")
                     else:
                         # 不检查文件存在，直接发送通知
                         logger.info(f"跳过文件存在检查，直接发送通知: {file_path_to_check}")
@@ -910,20 +928,28 @@ class CloudDriveWebhook(_PluginBase):
             bool: 文件是否存在
         """
         try:
+            logger.info(f"=== 开始gRPC文件存在检查 ===")
+            logger.info(f"检查文件路径: {file_path}")
+            
             # 首先登录
             login_success, login_message = self._login_to_clouddrive()
             if not login_success:
                 logger.warning(f"登录失败，无法检查文件: {login_message}")
                 return False
             
+            logger.info(f"登录状态: {login_success}")
+            
             stub = self._get_grpc_stub()
             if not stub:
                 logger.warning("无法创建gRPC连接，无法检查文件")
                 return False
             
+            logger.info(f"gRPC stub创建成功")
+            
             # 导入protobuf消息
             try:
                 import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+                logger.info(f"protobuf模块导入成功")
             except ImportError as e:
                 logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
                 return False
@@ -933,40 +959,87 @@ class CloudDriveWebhook(_PluginBase):
             parent_path = str(file_path_obj.parent)
             file_name = file_path_obj.name
             
+            logger.info(f"解析路径信息:")
+            logger.info(f"  完整路径: {file_path}")
+            logger.info(f"  父目录: {parent_path}")
+            logger.info(f"  文件名: {file_name}")
+            
             # 创建FindFileByPath请求
             find_request = CloudDrive_pb2.FindFileByPathRequest(
                 parentPath=parent_path,
                 path=file_name
             )
             
-            logger.info(f"通过gRPC检查文件是否存在: {file_path}")
+            logger.info(f"创建FindFileByPath请求:")
+            logger.info(f"  parentPath: {find_request.parentPath}")
+            logger.info(f"  path: {find_request.path}")
             
             # 创建带token的metadata
             metadata = [('authorization', f'Bearer {self._token}')]
+            logger.info(f"创建metadata: {metadata}")
             
             # 调用FindFileByPath API
+            logger.info(f"开始调用FindFileByPath API...")
             response = stub.FindFileByPath(find_request, metadata=metadata)
             
+            logger.info(f"API调用完成，检查响应...")
+            
             # 检查响应
-            if response and hasattr(response, 'fullPathName') and response.fullPathName:
-                logger.info(f"文件存在: {response.fullPathName}")
-                return True
+            if response:
+                logger.info(f"响应对象存在，类型: {type(response)}")
+                logger.info(f"响应对象属性: {dir(response)}")
+                
+                if hasattr(response, 'fullPathName'):
+                    logger.info(f"fullPathName属性存在: {response.fullPathName}")
+                    if response.fullPathName:
+                        logger.info(f"✓ 文件存在: {response.fullPathName}")
+                        return True
+                    else:
+                        logger.warning(f"✗ fullPathName为空")
+                else:
+                    logger.warning(f"✗ 响应对象没有fullPathName属性")
+                
+                # 打印更多响应信息
+                for attr in dir(response):
+                    if not attr.startswith('_'):
+                        try:
+                            value = getattr(response, attr)
+                            logger.info(f"响应属性 {attr}: {value}")
+                        except Exception as e:
+                            logger.info(f"响应属性 {attr}: 无法获取 ({str(e)})")
             else:
-                logger.warning(f"文件不存在: {file_path}")
-                return False
+                logger.warning(f"✗ API返回空响应")
+            
+            logger.warning(f"✗ 文件不存在: {file_path}")
+            return False
                 
         except grpc.RpcError as e:
+            logger.error(f"=== gRPC错误详情 ===")
+            logger.error(f"错误代码: {e.code()}")
+            logger.error(f"错误详情: {e.details()}")
+            logger.error(f"错误消息: {str(e)}")
+            
             if e.code() == grpc.StatusCode.NOT_FOUND:
-                logger.info(f"文件不存在: {file_path}")
+                logger.info(f"✓ 文件不存在 (NOT_FOUND): {file_path}")
                 return False
             elif e.code() == grpc.StatusCode.UNAUTHENTICATED:
-                logger.warning(f"认证失败，无法检查文件: {e.details()}")
+                logger.warning(f"✗ 认证失败 (UNAUTHENTICATED): {e.details()}")
+                return False
+            elif e.code() == grpc.StatusCode.PERMISSION_DENIED:
+                logger.warning(f"✗ 权限不足 (PERMISSION_DENIED): {e.details()}")
+                return False
+            elif e.code() == grpc.StatusCode.INVALID_ARGUMENT:
+                logger.warning(f"✗ 参数无效 (INVALID_ARGUMENT): {e.details()}")
                 return False
             else:
-                logger.warning(f"检查文件时发生gRPC错误: {e.code()} - {e.details()}")
+                logger.warning(f"✗ 其他gRPC错误 ({e.code()}): {e.details()}")
                 return False
         except Exception as e:
-            logger.warning(f"检查文件时发生错误: {str(e)}")
+            logger.error(f"=== 其他错误详情 ===")
+            logger.error(f"错误类型: {type(e)}")
+            logger.error(f"错误消息: {str(e)}")
+            import traceback
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             return False
 
     def _send_refresh_notification(self, file_path: str):
