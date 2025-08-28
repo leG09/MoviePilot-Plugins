@@ -519,14 +519,6 @@ class CloudDriveWebhook(_PluginBase):
                 
                 # 导入protobuf消息
                 try:
-                    import sys
-                    import os
-                    
-                    # 添加当前插件目录到Python路径
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    if current_dir not in sys.path:
-                        sys.path.insert(0, current_dir)
-                    
                     import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
                 except ImportError as e:
                     logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
@@ -579,14 +571,6 @@ class CloudDriveWebhook(_PluginBase):
             
             # 导入protobuf消息
             try:
-                import sys
-                import os
-                
-                # 添加当前插件目录到Python路径
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                if current_dir not in sys.path:
-                    sys.path.insert(0, current_dir)
-                
                 import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
             except ImportError as e:
                 logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
