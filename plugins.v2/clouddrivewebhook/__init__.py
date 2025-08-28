@@ -11,7 +11,7 @@ except ImportError:
     # 兼容性处理：如果typing_extensions不可用，使用typing
     from typing import Annotated
 
-from app.core.plugin import _PluginBase
+from app.plugins import _PluginBase
 from app.core.config import settings
 from app.core.security import verify_apikey
 from app.schemas import Notification, NotificationType, ContentType
@@ -69,6 +69,11 @@ class CloudDriveWebhook(_PluginBase):
         """获取插件状态"""
         return self._enabled
 
+    @staticmethod
+    def get_command() -> list:
+        """获取插件命令"""
+        return []
+
     def get_api(self) -> list:
         """获取API接口"""
         return [
@@ -81,7 +86,7 @@ class CloudDriveWebhook(_PluginBase):
             }
         ]
 
-    def get_form(self) -> list:
+    def get_form(self) -> tuple:
         """获取配置表单"""
         return [
             {
@@ -232,7 +237,16 @@ class CloudDriveWebhook(_PluginBase):
                     }
                 ]
             }
-        ]
+        ], {
+            "enabled": False,
+            "api_token": "",
+            "send_notification": True,
+            "server_addr": "",
+            "username": "",
+            "password": "",
+            "use_ssl": False,
+            "path_mappings": ""
+        }
 
     def get_page(self) -> list:
         """获取插件页面"""
