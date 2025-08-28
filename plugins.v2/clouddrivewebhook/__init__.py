@@ -15,6 +15,8 @@ from app.plugins import _PluginBase
 from app.core.config import settings
 from app.core.security import verify_apikey
 from app.schemas import Notification, NotificationType, ContentType
+from app.schemas.transfer import TransferInfo
+from app.schemas.file import FileItem
 from app.chain.transfer import TransferChain
 from app.chain.media import MediaChain
 from app.core.metainfo import MetaInfoPath
@@ -977,9 +979,6 @@ class CloudDriveWebhook(_PluginBase):
         try:
             transfer_chain = TransferChain()
             
-            # 从路径字符串中提取文件名
-            file_name = Path(file_path).name
-            
             # 解析文件路径获取媒体信息
             file_path_obj = Path(file_path)
             meta = MetaInfoPath(file_path_obj)
@@ -992,44 +991,44 @@ class CloudDriveWebhook(_PluginBase):
                 mediainfo = MediaChain().recognize_by_path(str(file_path_obj))
             
             if mediainfo:
-                # 获取媒体标题
-                title = f"{mediainfo.title_year} 入库成功！"
-                # 获取媒体图片
-                image = mediainfo.get_message_image()
+                logger.info(f"识别到媒体信息：{mediainfo.title_year}")
+                
+                # 创建TransferInfo对象
+                
+                # 创建FileItem对象
+                file_item = FileItem(
+                    path=file_path_obj,
+                    size=file_path_obj.stat().st_size if file_path_obj.exists() else 0
+                )
+                
+                # 创建TransferInfo对象
+                transfer_info = TransferInfo(
+                    success=True,
+                    fileitem=file_item,
+                    file_count=1,
+                    total_size=file_item.size,
+                    transfer_type="move"
+                )
                 
                 # 获取季集信息
-                se_str = None
+                season_episode = None
                 if mediainfo.type == MediaType.TV and meta:
                     if meta.season and meta.episode_list:
-                        se_str = f"{meta.season} E{','.join(map(str, meta.episode_list))}"
+                        season_episode = f"{meta.season} E{','.join(map(str, meta.episode_list))}"
                     elif meta.season_episode:
-                        se_str = meta.season_episode
+                        season_episode = meta.season_episode
                 
-                # 构建通知文本
-                text = f"文件：{file_name}\n位置：{file_path}"
-                if se_str:
-                    text += f"\n季集：{se_str}"
+                # 使用TransferChain的send_transfer_message方法发送通知
+                transfer_chain.send_transfer_message(
+                    meta=meta,
+                    mediainfo=mediainfo,
+                    transferinfo=transfer_info,
+                    season_episode=season_episode
+                )
                 
-                logger.info(f"识别到媒体信息：{mediainfo.title_year}")
+                logger.info(f"已发送入库通知：{mediainfo.title_year}")
             else:
-                # 如果无法识别媒体信息，使用文件名
-                title = f"CloudDrive入库成功！"
-                text = f"文件：{file_name}\n位置：{file_path}"
-                image = ""
-                logger.warning(f"无法识别媒体信息，使用文件名：{file_name}")
-            
-            # 参考transfer.py中的入库通知格式
-            notification = Notification(
-                mtype=NotificationType.Organize,
-                ctype=ContentType.OrganizeSuccess,
-                title=title,
-                text=text,
-                image=image,
-                link=settings.MP_DOMAIN('#/history')
-            )
-            
-            transfer_chain.post_message(notification)
-            logger.info(f"已发送入库通知：{file_name}")
+                logger.warning(f"无法识别媒体信息，跳过通知：{file_path}")
             
         except Exception as e:
             logger.warning(f"发送入库通知失败：{str(e)}")
