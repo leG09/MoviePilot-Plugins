@@ -280,6 +280,7 @@ class CloudDriveWebhook(_PluginBase):
                 with self._refresh_lock:
                     current_time = time.time()
                     directories_to_refresh = []
+                    directory_files = {}  # 保存每个目录的文件信息
                     
                     for directory, requests in self._refresh_queue.items():
                         if requests:  # 如果有请求
@@ -288,6 +289,8 @@ class CloudDriveWebhook(_PluginBase):
                             # 如果距离最新请求超过2秒，则执行刷新
                             if current_time - latest_request_time >= 2.0:
                                 directories_to_refresh.append(directory)
+                                # 保存该目录的文件信息
+                                directory_files[directory] = requests.copy()
                                 # 清空该目录的请求队列
                                 self._refresh_queue[directory].clear()
                 
@@ -298,6 +301,10 @@ class CloudDriveWebhook(_PluginBase):
                         result = self._refresh_directory_via_grpc(directory)
                         if result["success"]:
                             logger.info(f"目录 {directory} 刷新成功")
+                            
+                            # 刷新成功后，检查该目录下的所有文件并发送通知
+                            if self._send_notification and directory in directory_files:
+                                self._send_notifications_for_files(directory_files[directory])
                         else:
                             logger.error(f"目录 {directory} 刷新失败: {result['message']}")
                     except Exception as e:
@@ -321,9 +328,12 @@ class CloudDriveWebhook(_PluginBase):
             str: 映射后的文件路径
         """
         if not self._path_mappings:
+            logger.info(f"未配置路径映射，使用原始路径: {file_path}")
             return file_path
         
         mapped_path = file_path
+        logger.info(f"开始路径映射，原始路径: {file_path}")
+        logger.info(f"当前路径映射配置: {self._path_mappings}")
         
         # 解析路径映射配置
         for line in self._path_mappings.strip().split('\n'):
@@ -336,12 +346,21 @@ class CloudDriveWebhook(_PluginBase):
                 source_path = source_path.strip()
                 target_path = target_path.strip()
                 
+                logger.info(f"检查映射规则: {source_path} => {target_path}")
+                
                 if file_path.startswith(source_path):
                     mapped_path = file_path.replace(source_path, target_path, 1)
-                    logger.info(f"路径映射: {file_path} => {mapped_path}")
+                    logger.info(f"路径映射成功: {file_path} => {mapped_path}")
                     break
+                else:
+                    logger.info(f"路径不匹配: {file_path} 不以 {source_path} 开头")
             except Exception as e:
                 logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
+        
+        if mapped_path == file_path:
+            logger.warning(f"路径映射失败，使用原始路径: {file_path}")
+        else:
+            logger.info(f"最终映射路径: {mapped_path}")
         
         return mapped_path
 
@@ -378,16 +397,16 @@ class CloudDriveWebhook(_PluginBase):
             logger.info(f"准备刷新目录：{parent_dir_str}")
             
             # 添加到刷新队列
+            logger.info(f"准备将目录 {parent_dir_str} 添加到刷新队列")
             with self._refresh_lock:
                 self._refresh_queue[parent_dir_str].append({
                     'timestamp': time.time(),
                     'original_path': file_path,
                     'mapped_path': mapped_file_path
                 })
+                logger.info(f"目录 {parent_dir_str} 已添加到刷新队列，当前队列长度: {len(self._refresh_queue[parent_dir_str])}")
             
-            # 发送入库通知
-            if self._send_notification:
-                self._send_refresh_notification(mapped_file_path)
+            # 注意：通知将在目录刷新完成后发送
             
             return {
                 "success": True,
@@ -545,6 +564,32 @@ class CloudDriveWebhook(_PluginBase):
             error_msg = f"刷新目录时发生错误：{str(e)}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
+
+    def _send_notifications_for_files(self, files_info: list):
+        """
+        为文件列表发送入库通知
+        
+        Args:
+            files_info: 文件信息列表
+        """
+        try:
+            logger.info(f"准备为 {len(files_info)} 个文件发送通知")
+            
+            for file_info in files_info:
+                mapped_file_path = file_info.get('mapped_path', '')
+                if mapped_file_path:
+                    # 检查文件是否存在
+                    file_path_obj = Path(mapped_file_path)
+                    if file_path_obj.exists():
+                        logger.info(f"文件存在，发送通知: {mapped_file_path}")
+                        self._send_refresh_notification(mapped_file_path)
+                    else:
+                        logger.warning(f"文件不存在，跳过通知: {mapped_file_path}")
+                else:
+                    logger.warning(f"文件信息中缺少mapped_path: {file_info}")
+                    
+        except Exception as e:
+            logger.error(f"发送文件通知时发生错误: {str(e)}")
 
     def _send_refresh_notification(self, file_path: str):
         """
