@@ -469,7 +469,7 @@ class CloudDriveWebhook(_PluginBase):
         CloudDrive目录刷新Webhook
         
         Args:
-            request_data: 请求数据，包含data数组，每个元素有source_file字段
+            request_data: 请求数据，包含data数组，每个元素有source_file字段；支持path_type参数："mapping"(默认)/"source"
             apikey: API密钥（通过query参数或X-API-KEY头传递）
             
         Returns:
@@ -487,6 +487,69 @@ class CloudDriveWebhook(_PluginBase):
             if not data or not isinstance(data, list):
                 return {"success": False, "message": "data字段为空或格式错误"}
             
+            # 刷新模式：mapping(默认) 或 source
+            path_type = str(request_data.get("path_type", "mapping")).strip().lower()
+            if path_type not in ("mapping", "source"):
+                path_type = "mapping"
+            logger.info(f"刷新模式 path_type: {path_type}")
+
+            # 如果是 source 模式：基于源路径层级刷新（按映射前缀起点逐级到父目录），不发送通知
+            if path_type == "source":
+                # 收集需要刷新的(映射后的)目录集合
+                target_directories: set[str] = set()
+                failed_files = []
+
+                for i, item in enumerate(data):
+                    try:
+                        source_file = item.get("source_file", "")
+                        if not source_file:
+                            logger.warning(f"第 {i+1} 个文件缺少source_file字段: {item}")
+                            failed_files.append({"index": i, "reason": "missing_source_file"})
+                            continue
+
+                        # 仅到父目录为止
+                        file_parent = str(Path(source_file).parent)
+
+                        # 找到源路径映射前缀
+                        source_prefix = self._get_source_path_prefix(source_file)
+                        if not source_prefix:
+                            logger.warning(f"未找到源路径映射前缀，跳过: {source_file}")
+                            failed_files.append({"index": i, "source_file": source_file, "reason": "no_source_prefix"})
+                            continue
+
+                        # 基于源前缀构建逐级目录列表（源路径）
+                        source_levels = self._build_hierarchy_from_prefix(file_parent, source_prefix)
+
+                        # 将每个源目录映射为目标目录以适配CloudDrive gRPC
+                        for src_dir in source_levels:
+                            mapped_dir, ok = self._map_file_path(src_dir)
+                            if ok:
+                                target_directories.add(mapped_dir.rstrip('/'))
+                                logger.info(f"加入刷新(源→映射): {src_dir} → {mapped_dir}")
+                            else:
+                                logger.warning(f"目录映射失败，跳过: {src_dir}")
+                                failed_files.append({"index": i, "source_dir": src_dir, "reason": "map_dir_failed"})
+                    except Exception as e:
+                        logger.error(f"处理源路径目录时发生错误: {str(e)}")
+                        failed_files.append({"index": i, "reason": "processing_error", "error": str(e)})
+
+                # 合并重合目录并刷新（不发送通知）
+                merged_dirs = self._merge_overlapping_directories(sorted(list(target_directories)), {})
+                for directory in merged_dirs:
+                    try:
+                        logger.info(f"执行源模式合并刷新: {directory}")
+                        _ = self._refresh_directory_via_grpc(directory)
+                    except Exception as e:
+                        logger.error(f"刷新目录 {directory} 时发生错误: {str(e)}")
+
+                return {
+                    "success": True,
+                    "message": f"源模式刷新完成，目录数: {len(merged_dirs)}，失败: {len(failed_files)}",
+                    "path_type": path_type,
+                    "refreshed_directories": merged_dirs,
+                    "failed_files": failed_files
+                }
+
             logger.info(f"接收到 {len(data)} 个文件路径")
             
             # 处理每个文件路径
@@ -581,7 +644,8 @@ class CloudDriveWebhook(_PluginBase):
                 },
                 "processed_files": processed_files,
                 "skipped_files": skipped_files,
-                "failed_files": failed_files
+                "failed_files": failed_files,
+                "path_type": path_type
             }
                 
         except Exception as e:
@@ -1107,6 +1171,78 @@ class CloudDriveWebhook(_PluginBase):
             import traceback
             logger.error(f"错误堆栈: {traceback.format_exc()}")
             return False
+
+    def _get_source_path_prefix(self, source_path: str) -> str:
+        """
+        从路径映射配置中获取与源路径匹配的源前缀（左侧前缀）
+        
+        Args:
+            source_path: 源文件或目录路径
+        Returns:
+            str: 源路径前缀，未找到返回空字符串
+        """
+        try:
+            if not self._path_mappings:
+                logger.warning("未配置路径映射")
+                return ""
+            # 选择与source_path匹配且最长的源前缀
+            best_match = ""
+            for line in self._path_mappings.strip().split('\n'):
+                line = line.strip()
+                if not line or '=>' not in line:
+                    continue
+                try:
+                    src_prefix, _ = line.split('=>', 1)
+                    src_prefix = src_prefix.strip()
+                    if source_path.startswith(src_prefix) and len(src_prefix) > len(best_match):
+                        best_match = src_prefix
+                except Exception as e:
+                    logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
+            if best_match:
+                logger.info(f"找到源路径前缀: {best_match}")
+            else:
+                logger.warning(f"未匹配到源路径前缀: {source_path}")
+            return best_match
+        except Exception as e:
+            logger.error(f"获取源路径前缀时发生错误: {str(e)}")
+            return ""
+
+    def _build_hierarchy_from_prefix(self, full_path: str, prefix: str) -> list[str]:
+        """
+        从给定前缀开始，逐级构建到full_path的所有层级目录列表（包含prefix与full_path）
+        Args:
+            full_path: 终点目录（通常为文件父目录）
+            prefix: 起始前缀目录
+        Returns:
+            list[str]: 逐级目录列表
+        """
+        try:
+            # 规范化，移除末尾斜杠
+            full_path = full_path.rstrip('/')
+            prefix = prefix.rstrip('/')
+            if not full_path.startswith(prefix):
+                # 若不包含，直接返回prefix与full_path的最小公共起点（退化为prefix）
+                return [prefix]
+            prefix_parts = Path(prefix).parts
+            full_parts = Path(full_path).parts
+            # 找到prefix在full中的起始索引
+            start = None
+            for i in range(len(full_parts) - len(prefix_parts) + 1):
+                if full_parts[i:i+len(prefix_parts)] == prefix_parts:
+                    start = i
+                    break
+            if start is None:
+                return [prefix]
+            # 从prefix到full逐级拼接
+            result = [prefix]
+            current = prefix
+            for j in range(start + len(prefix_parts), len(full_parts)):
+                current = f"{current}/{full_parts[j]}"
+                result.append(current)
+            return result
+        except Exception as e:
+            logger.error(f"构建目录层级时发生错误: {str(e)}")
+            return [prefix]
 
     def _get_target_path_prefix(self, file_path: str) -> str:
         """
