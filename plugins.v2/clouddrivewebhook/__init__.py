@@ -431,40 +431,68 @@ class CloudDriveWebhook(_PluginBase):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
-    def _get_grpc_stub(self):
+    def _get_grpc_stub(self, force_recreate=False):
         """获取gRPC stub"""
         try:
-            # 检查通道是否需要重新创建
-            need_new_channel = False
-            if self._channel is None:
-                need_new_channel = True
-            else:
-                # 检查通道状态
-                try:
-                    # 尝试获取通道状态
-                    state = self._channel.get_state(try_to_connect=True)
-                    if state == grpc.ChannelConnectivity.SHUTDOWN:
-                        need_new_channel = True
-                except Exception:
+            # 如果强制重建或者通道无效，则重新创建
+            need_new_channel = force_recreate
+            
+            if not need_new_channel:
+                # 检查通道是否需要重新创建
+                if self._channel is None or self._stub is None:
                     need_new_channel = True
+                    logger.info("gRPC通道或stub为空，需要重新创建")
+                else:
+                    # 检查通道状态
+                    try:
+                        state = self._channel.get_state(try_to_connect=False)
+                        logger.debug(f"当前gRPC通道状态: {state}")
+                        if state in [grpc.ChannelConnectivity.SHUTDOWN, grpc.ChannelConnectivity.TRANSIENT_FAILURE]:
+                            need_new_channel = True
+                            logger.info(f"gRPC通道状态异常({state})，需要重新创建")
+                    except Exception as e:
+                        logger.warning(f"检查gRPC通道状态失败: {str(e)}")
+                        need_new_channel = True
             
             if need_new_channel:
+                logger.info("开始重新创建gRPC连接")
+                
                 # 关闭旧通道
                 if self._channel:
                     try:
+                        logger.debug("关闭旧的gRPC通道")
                         self._channel.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"关闭旧通道时发生错误: {str(e)}")
+                
+                # 重置状态
+                self._channel = None
+                self._stub = None
+                
+                # 验证服务器地址
+                if not self._server_addr:
+                    logger.error("服务器地址未配置")
+                    return None
                 
                 # 创建新的gRPC通道
-                if self._use_ssl:
-                    self._channel = grpc.secure_channel(self._server_addr, grpc.ssl_channel_credentials())
-                else:
-                    self._channel = grpc.insecure_channel(self._server_addr)
-                
-                # 导入protobuf生成的模块
+                logger.info(f"创建新的gRPC通道: {self._server_addr}")
                 try:
-                    # 尝试导入已生成的protobuf模块
+                    if self._use_ssl:
+                        self._channel = grpc.secure_channel(self._server_addr, grpc.ssl_channel_credentials())
+                    else:
+                        self._channel = grpc.insecure_channel(self._server_addr)
+                    
+                    # 等待通道准备就绪（最多等待5秒）
+                    grpc.channel_ready_future(self._channel).result(timeout=5)
+                    logger.info("gRPC通道创建成功并已就绪")
+                    
+                except Exception as e:
+                    logger.error(f"创建gRPC通道失败: {str(e)}")
+                    self._channel = None
+                    return None
+                
+                # 导入protobuf模块并创建stub
+                try:
                     import sys
                     import os
                     
@@ -475,14 +503,16 @@ class CloudDriveWebhook(_PluginBase):
                     
                     import clouddrive.CloudDrive_pb2_grpc as CloudDrive_grpc_pb2_grpc
                     self._stub = CloudDrive_grpc_pb2_grpc.CloudDriveFileSrvStub(self._channel)
-                    logger.info(f"成功创建gRPC连接: {self._server_addr}")
+                    logger.info(f"成功创建gRPC stub: {self._server_addr}")
+                    
                 except ImportError as e:
-                    # 如果protobuf模块不存在，返回错误
                     logger.error(f"未找到CloudDrive protobuf模块: {str(e)}")
-                    logger.error("请确保protobuf文件已正确生成")
+                    self._channel = None
+                    self._stub = None
                     return None
             
             return self._stub
+            
         except Exception as e:
             logger.error(f"创建gRPC stub失败: {str(e)}")
             # 重置状态
@@ -583,13 +613,48 @@ class CloudDriveWebhook(_PluginBase):
                     
         except grpc.RpcError as e:
             if "Cannot invoke RPC on closed channel" in str(e):
-                logger.warning("gRPC通道已关闭，重置连接状态")
-                self._channel = None
-                self._stub = None
-                self._token = None
-                self._login_time = 0
-            logger.error(f"登录CloudDrive时发生gRPC错误: {str(e)}")
-            return False, str(e)
+                logger.warning("gRPC通道已关闭，尝试重新创建连接")
+                # 强制重新创建连接
+                stub = self._get_grpc_stub(force_recreate=True)
+                if stub:
+                    logger.info("gRPC连接重新创建成功，重试登录")
+                    # 重新尝试登录（仅一次，避免无限递归）
+                    try:
+                        # 导入protobuf消息
+                        import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+                        
+                        # 创建登录请求
+                        login_request = CloudDrive_pb2.UserLoginRequest(
+                            userName=self._username,
+                            password=self._password,
+                            synDataToCloud=False
+                        )
+                        
+                        # 调用登录API
+                        response = stub.Login(login_request)
+                        
+                        if response.success:
+                            self._token = "logged_in"
+                            self._login_time = time.time()
+                            logger.info("CloudDrive重新登录成功")
+                            return True, "重新登录成功"
+                        else:
+                            error_message = getattr(response, 'errorMessage', 'Unknown error')
+                            if "already login" in error_message.lower():
+                                self._token = "logged_in"
+                                self._login_time = time.time()
+                                return True, "已经登录"
+                            else:
+                                return False, error_message
+                    except Exception as retry_e:
+                        logger.error(f"重试登录失败: {str(retry_e)}")
+                        return False, f"重试登录失败: {str(retry_e)}"
+                else:
+                    logger.error("重新创建gRPC连接失败")
+                    return False, "重新创建gRPC连接失败"
+            else:
+                logger.error(f"登录CloudDrive时发生gRPC错误: {str(e)}")
+                return False, str(e)
         except Exception as e:
             logger.error(f"登录CloudDrive时发生错误: {str(e)}")
             return False, str(e)
@@ -649,9 +714,40 @@ class CloudDriveWebhook(_PluginBase):
                 
         except grpc.RpcError as e:
             if "Cannot invoke RPC on closed channel" in str(e):
-                logger.warning("gRPC通道已关闭，重置连接状态")
-                self._channel = None
-                self._stub = None
+                logger.warning("gRPC通道已关闭，尝试重新创建连接并重试")
+                # 强制重新创建连接
+                stub = self._get_grpc_stub(force_recreate=True)
+                if stub:
+                    # 重新尝试登录
+                    login_success, login_message = self._login_to_clouddrive()
+                    if login_success:
+                        # 重新尝试刷新目录（仅一次）
+                        try:
+                            import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+                            refresh_request = CloudDrive_pb2.ListSubFileRequest(
+                                path=directory_path,
+                                forceRefresh=True,
+                                checkExpires=True
+                            )
+                            response_stream = stub.GetSubFiles(refresh_request)
+                            file_count = 0
+                            for response in response_stream:
+                                if hasattr(response, 'subFiles'):
+                                    file_count += len(response.subFiles)
+                            logger.info(f"重试刷新成功，发现 {file_count} 个文件")
+                            return {
+                                "success": True,
+                                "message": f"重试刷新成功，目录 {directory_path} 发现 {file_count} 个文件",
+                                "file_count": file_count
+                            }
+                        except Exception as retry_e:
+                            logger.error(f"重试刷新失败: {str(retry_e)}")
+                            return {"success": False, "message": f"重试刷新失败: {str(retry_e)}"}
+                    else:
+                        return {"success": False, "message": f"重新登录失败: {login_message}"}
+                else:
+                    return {"success": False, "message": "重新创建gRPC连接失败"}
+            
             error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
