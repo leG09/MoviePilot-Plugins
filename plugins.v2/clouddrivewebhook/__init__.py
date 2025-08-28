@@ -79,8 +79,8 @@ class CloudDriveWebhook(_PluginBase):
         return [
             {
                 "path": "/clouddrive_webhook",
-                "func": self.clouddrive_webhook,
-                "method": "POST",
+                "endpoint": self.clouddrive_webhook,
+                "methods": ["POST"],
                 "summary": "CloudDrive目录刷新Webhook",
                 "description": "接收文件路径，通过gRPC直接刷新该文件所在的上一级目录"
             }
