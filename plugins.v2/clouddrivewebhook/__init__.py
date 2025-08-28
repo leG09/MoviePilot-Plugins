@@ -344,7 +344,13 @@ class CloudDriveWebhook(_PluginBase):
                 for directory in merged_directories:
                     try:
                         logger.info(f"执行合并刷新: {directory}")
+                        # 先尝试直接刷新
                         result = self._refresh_directory_via_grpc(directory)
+                        # 若失败，先刷新父级目录链再重试一次
+                        if not result.get("success"):
+                            logger.warning(f"直接刷新失败，尝试先刷新父级链后重试: {directory}")
+                            self._refresh_parent_chain(directory)
+                            result = self._refresh_directory_via_grpc(directory)
                         if result["success"]:
                             logger.info(f"目录 {directory} 刷新成功")
                             
@@ -1171,6 +1177,45 @@ class CloudDriveWebhook(_PluginBase):
             import traceback
             logger.error(f"错误堆栈: {traceback.format_exc()}")
             return False
+
+    def _refresh_parent_chain(self, directory_path: str) -> None:
+        """
+        逐级刷新父级目录链，从映射前缀一路刷新到指定目录的上级目录。
+        仅做尽力而为的容错，不抛异常。
+        """
+        try:
+            if not directory_path:
+                return
+            # 找到映射前缀（目标前缀）
+            target_prefix = self._get_target_path_prefix(directory_path)
+            if not target_prefix:
+                logger.warning(f"无法确定目标路径前缀，跳过父级链刷新: {directory_path}")
+                return
+            dir_parent = str(Path(directory_path).parent)
+            if not dir_parent or dir_parent == ".":
+                return
+            # 构建从前缀到父目录的层级
+            try:
+                parts = Path(dir_parent).parts
+                prefix_parts = Path(target_prefix).parts
+                start = None
+                for i in range(len(parts) - len(prefix_parts) + 1):
+                    if parts[i:i+len(prefix_parts)] == prefix_parts:
+                        start = i
+                        break
+                if start is None:
+                    logger.warning(f"父级链中未找到前缀: {target_prefix} in {dir_parent}")
+                    return
+                # 逐级刷新
+                current = target_prefix
+                self._refresh_directory_via_grpc(current)
+                for j in range(start + len(prefix_parts), len(parts)):
+                    current = f"{current}/{parts[j]}"
+                    self._refresh_directory_via_grpc(current)
+            except Exception as e:
+                logger.warning(f"构建/刷新父级链失败: {str(e)}")
+        except Exception:
+            pass
 
     def _get_source_path_prefix(self, source_path: str) -> str:
         """
