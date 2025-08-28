@@ -41,6 +41,7 @@ class CloudDriveWebhook(_PluginBase):
         self._enabled = config.get("enabled", False) if config else False
         self._api_token = config.get("api_token", "") if config else ""
         self._send_notification = config.get("send_notification", True) if config else True
+        self._check_file_exists = config.get("check_file_exists", True) if config else True
         self._server_addr = config.get("server_addr", "") if config else ""
         self._username = config.get("username", "") if config else ""
         self._password = config.get("password", "") if config else ""
@@ -126,6 +127,38 @@ class CloudDriveWebhook(_PluginBase):
                                             "model": "send_notification",
                                             "label": "发送入库通知",
                                             "color": "primary"
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "check_file_exists",
+                                            "label": "检查文件是否存在",
+                                            "color": "primary"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "text": "检查文件是否存在：启用后会在发送通知前通过gRPC检查文件是否真实存在于CloudDrive中。如果文件不存在，将跳过通知发送。"
                                         }
                                     }
                                 ]
@@ -248,6 +281,7 @@ class CloudDriveWebhook(_PluginBase):
             "enabled": False,
             "api_token": "",
             "send_notification": True,
+            "check_file_exists": True,
             "server_addr": "",
             "username": "",
             "password": "",
@@ -313,6 +347,7 @@ class CloudDriveWebhook(_PluginBase):
                             
                             # 刷新成功后，检查该目录下的所有文件并发送通知
                             if self._send_notification and directory in directory_files:
+                                logger.info(f"目录刷新成功，准备发送 {len(directory_files[directory])} 个文件的通知")
                                 self._send_notifications_for_files(directory_files[directory])
                         else:
                             logger.error(f"目录 {directory} 刷新失败: {result['message']}")
@@ -345,6 +380,7 @@ class CloudDriveWebhook(_PluginBase):
         logger.info(f"当前路径映射配置: {self._path_mappings}")
         
         # 解析路径映射配置
+        mapping_applied = False
         for line in self._path_mappings.strip().split('\n'):
             line = line.strip()
             if not line or '=>' not in line:
@@ -360,13 +396,14 @@ class CloudDriveWebhook(_PluginBase):
                 if file_path.startswith(source_path):
                     mapped_path = file_path.replace(source_path, target_path, 1)
                     logger.info(f"路径映射成功: {file_path} => {mapped_path}")
+                    mapping_applied = True
                     break
                 else:
-                    logger.info(f"路径不匹配: {file_path} 不以 {source_path} 开头")
+                    logger.debug(f"路径不匹配: {file_path} 不以 {source_path} 开头")
             except Exception as e:
                 logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
         
-        if mapped_path == file_path:
+        if not mapping_applied:
             logger.warning(f"路径映射失败，使用原始路径: {file_path}")
         else:
             logger.info(f"最终映射路径: {mapped_path}")
@@ -424,7 +461,8 @@ class CloudDriveWebhook(_PluginBase):
                 "message": f"目录 {parent_dir_str} 已加入刷新队列",
                 "queued_directory": parent_dir_str,
                 "original_file": file_path,
-                "mapped_file": mapped_file_path
+                "mapped_file": mapped_file_path,
+                "path_mapping_applied": mapped_file_path != file_path
             }
                 
         except Exception as e:
@@ -833,19 +871,101 @@ class CloudDriveWebhook(_PluginBase):
             
             for file_info in files_info:
                 mapped_file_path = file_info.get('mapped_path', '')
-                if mapped_file_path:
-                    # 检查文件是否存在
-                    file_path_obj = Path(mapped_file_path)
-                    if file_path_obj.exists():
-                        logger.info(f"文件存在，发送通知: {mapped_file_path}")
-                        self._send_refresh_notification(mapped_file_path)
+                original_file_path = file_info.get('original_path', '')
+                
+                # 优先使用映射路径，如果不存在则使用原始路径
+                file_path_to_check = mapped_file_path if mapped_file_path else original_file_path
+                
+                if file_path_to_check:
+                    # 根据配置决定是否检查文件存在
+                    if self._check_file_exists:
+                        # 通过gRPC检查文件是否存在
+                        file_exists = self._check_file_exists_via_grpc(file_path_to_check)
+                        
+                        if file_exists:
+                            logger.info(f"文件存在，发送通知: {file_path_to_check}")
+                            self._send_refresh_notification(file_path_to_check)
+                        else:
+                            logger.warning(f"文件不存在，跳过通知: {file_path_to_check}")
                     else:
-                        logger.warning(f"文件不存在，跳过通知: {mapped_file_path}")
+                        # 不检查文件存在，直接发送通知
+                        logger.info(f"跳过文件存在检查，直接发送通知: {file_path_to_check}")
+                        self._send_refresh_notification(file_path_to_check)
                 else:
-                    logger.warning(f"文件信息中缺少mapped_path: {file_info}")
+                    logger.warning(f"文件信息中缺少路径信息: {file_info}")
                     
         except Exception as e:
             logger.error(f"发送文件通知时发生错误: {str(e)}")
+
+    def _check_file_exists_via_grpc(self, file_path: str) -> bool:
+        """
+        通过gRPC检查文件是否存在
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            bool: 文件是否存在
+        """
+        try:
+            # 首先登录
+            login_success, login_message = self._login_to_clouddrive()
+            if not login_success:
+                logger.warning(f"登录失败，无法检查文件: {login_message}")
+                return False
+            
+            stub = self._get_grpc_stub()
+            if not stub:
+                logger.warning("无法创建gRPC连接，无法检查文件")
+                return False
+            
+            # 导入protobuf消息
+            try:
+                import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+            except ImportError as e:
+                logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
+                return False
+            
+            # 获取文件路径对象
+            file_path_obj = Path(file_path)
+            parent_path = str(file_path_obj.parent)
+            file_name = file_path_obj.name
+            
+            # 创建FindFileByPath请求
+            find_request = CloudDrive_pb2.FindFileByPathRequest(
+                parentPath=parent_path,
+                path=file_name
+            )
+            
+            logger.info(f"通过gRPC检查文件是否存在: {file_path}")
+            
+            # 创建带token的metadata
+            metadata = [('authorization', f'Bearer {self._token}')]
+            
+            # 调用FindFileByPath API
+            response = stub.FindFileByPath(find_request, metadata=metadata)
+            
+            # 检查响应
+            if response and hasattr(response, 'fullPathName') and response.fullPathName:
+                logger.info(f"文件存在: {response.fullPathName}")
+                return True
+            else:
+                logger.warning(f"文件不存在: {file_path}")
+                return False
+                
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.NOT_FOUND:
+                logger.info(f"文件不存在: {file_path}")
+                return False
+            elif e.code() == grpc.StatusCode.UNAUTHENTICATED:
+                logger.warning(f"认证失败，无法检查文件: {e.details()}")
+                return False
+            else:
+                logger.warning(f"检查文件时发生gRPC错误: {e.code()} - {e.details()}")
+                return False
+        except Exception as e:
+            logger.warning(f"检查文件时发生错误: {str(e)}")
+            return False
 
     def _send_refresh_notification(self, file_path: str):
         """
@@ -856,6 +976,9 @@ class CloudDriveWebhook(_PluginBase):
         """
         try:
             transfer_chain = TransferChain()
+            
+            # 从路径字符串中提取文件名
+            file_name = Path(file_path).name
             
             # 解析文件路径获取媒体信息
             file_path_obj = Path(file_path)
@@ -883,7 +1006,7 @@ class CloudDriveWebhook(_PluginBase):
                         se_str = meta.season_episode
                 
                 # 构建通知文本
-                text = f"文件：{file_path_obj.name}\n位置：{file_path}"
+                text = f"文件：{file_name}\n位置：{file_path}"
                 if se_str:
                     text += f"\n季集：{se_str}"
                 
@@ -891,9 +1014,9 @@ class CloudDriveWebhook(_PluginBase):
             else:
                 # 如果无法识别媒体信息，使用文件名
                 title = f"CloudDrive入库成功！"
-                text = f"文件：{file_path_obj.name}\n位置：{file_path}"
+                text = f"文件：{file_name}\n位置：{file_path}"
                 image = ""
-                logger.warning(f"无法识别媒体信息，使用文件名：{file_path_obj.name}")
+                logger.warning(f"无法识别媒体信息，使用文件名：{file_name}")
             
             # 参考transfer.py中的入库通知格式
             notification = Notification(
@@ -906,7 +1029,7 @@ class CloudDriveWebhook(_PluginBase):
             )
             
             transfer_chain.post_message(notification)
-            logger.info(f"已发送入库通知：{file_path_obj.name}")
+            logger.info(f"已发送入库通知：{file_name}")
             
         except Exception as e:
             logger.warning(f"发送入库通知失败：{str(e)}")
