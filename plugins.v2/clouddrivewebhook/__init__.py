@@ -465,12 +465,21 @@ class CloudDriveWebhook(_PluginBase):
                 # 导入protobuf生成的模块
                 try:
                     # 尝试导入已生成的protobuf模块
+                    import sys
+                    import os
+                    
+                    # 添加当前插件目录到Python路径
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    if current_dir not in sys.path:
+                        sys.path.insert(0, current_dir)
+                    
                     import clouddrive.CloudDrive_pb2_grpc as CloudDrive_grpc_pb2_grpc
                     self._stub = CloudDrive_grpc_pb2_grpc.CloudDriveFileSrvStub(self._channel)
                     logger.info(f"成功创建gRPC连接: {self._server_addr}")
-                except ImportError:
+                except ImportError as e:
                     # 如果protobuf模块不存在，返回错误
-                    logger.error("未找到CloudDrive protobuf模块，请确保protobuf文件已正确生成")
+                    logger.error(f"未找到CloudDrive protobuf模块: {str(e)}")
+                    logger.error("请确保protobuf文件已正确生成")
                     return None
             
             return self._stub
@@ -510,8 +519,17 @@ class CloudDriveWebhook(_PluginBase):
                 
                 # 导入protobuf消息
                 try:
+                    import sys
+                    import os
+                    
+                    # 添加当前插件目录到Python路径
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    if current_dir not in sys.path:
+                        sys.path.insert(0, current_dir)
+                    
                     import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
-                except ImportError:
+                except ImportError as e:
+                    logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
                     return False, "未找到CloudDrive protobuf模块"
                 
                 # 创建登录请求
@@ -561,8 +579,17 @@ class CloudDriveWebhook(_PluginBase):
             
             # 导入protobuf消息
             try:
+                import sys
+                import os
+                
+                # 添加当前插件目录到Python路径
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                if current_dir not in sys.path:
+                    sys.path.insert(0, current_dir)
+                
                 import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
-            except ImportError:
+            except ImportError as e:
+                logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
                 return {"success": False, "message": "未找到CloudDrive protobuf模块"}
             
             # 创建目录刷新请求（通过GetSubFiles强制刷新）
