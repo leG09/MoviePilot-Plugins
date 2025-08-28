@@ -499,6 +499,13 @@ class CloudDriveWebhook(_PluginBase):
                 logger.info("使用缓存的登录状态")
                 return True, "使用缓存的登录状态"
             
+            # 如果缓存过期，先尝试检查服务器端登录状态
+            if self._check_server_login_status():
+                logger.info("服务器端显示已登录，更新本地状态")
+                self._token = "logged_in"
+                self._login_time = current_time
+                return True, "服务器端已登录"
+            
             with self._login_lock:
                 # 双重检查，避免重复登录
                 if (self._token and self._login_time > 0 and 
@@ -516,6 +523,13 @@ class CloudDriveWebhook(_PluginBase):
                 stub = self._get_grpc_stub()
                 if not stub:
                     return False, "无法创建gRPC连接"
+                
+                # 再次检查服务器端登录状态（在锁内）
+                if self._check_server_login_status():
+                    logger.info("服务器端显示已登录，跳过登录步骤")
+                    self._token = "logged_in"
+                    self._login_time = current_time
+                    return True, "服务器端已登录"
                 
                 # 导入protobuf消息
                 try:
@@ -542,8 +556,15 @@ class CloudDriveWebhook(_PluginBase):
                     logger.info("CloudDrive登录成功")
                     return True, "登录成功"
                 else:
-                    logger.error(f"CloudDrive登录失败: {response.errorMessage}")
-                    return False, response.errorMessage
+                    # 检查是否是"已经登录"的情况
+                    if "already login" in response.errorMessage.lower() or "already logged in" in response.errorMessage.lower():
+                        logger.info("CloudDrive已经登录，使用现有会话")
+                        self._token = "logged_in"
+                        self._login_time = current_time
+                        return True, "已经登录"
+                    else:
+                        logger.error(f"CloudDrive登录失败: {response.errorMessage}")
+                        return False, response.errorMessage
                     
         except Exception as e:
             logger.error(f"登录CloudDrive时发生错误: {str(e)}")
@@ -664,6 +685,42 @@ class CloudDriveWebhook(_PluginBase):
             error_msg = f"测试连接时发生错误：{str(e)}\n{traceback.format_exc()}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
+
+    def _check_server_login_status(self) -> bool:
+        """
+        检查服务器端登录状态
+        
+        Returns:
+            bool: 是否已登录
+        """
+        try:
+            stub = self._get_grpc_stub()
+            if not stub:
+                return False
+            
+            # 尝试调用一个需要登录的API来检查状态
+            try:
+                import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+                from google.protobuf import empty_pb2
+                
+                # 尝试获取账户状态
+                response = stub.GetAccountStatus(empty_pb2.Empty())
+                logger.info("服务器端登录状态检查成功")
+                return True
+            except grpc.RpcError as e:
+                if e.code() == grpc.StatusCode.UNAUTHENTICATED:
+                    logger.info("服务器端显示未登录")
+                    return False
+                else:
+                    logger.warning(f"检查登录状态时发生错误: {e.code()} - {e.details()}")
+                    return False
+            except Exception as e:
+                logger.warning(f"检查登录状态时发生异常: {str(e)}")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"检查服务器登录状态失败: {str(e)}")
+            return False
 
     def _send_notifications_for_files(self, files_info: list):
         """
