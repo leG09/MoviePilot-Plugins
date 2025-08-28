@@ -48,5 +48,19 @@
     "history": {
       "v1.0": "首个版本，实现Emby入库Webhook功能"
     }
+  },
+  "CloudDriveWebhook": {
+    "name": "CloudDrive目录刷新Webhook",
+    "description": "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持路径映射、请求合并、登录缓存和智能通知。",
+    "labels": "云盘,Webhook,gRPC",
+    "version": "2.1",
+    "icon": "clouddrive.png",
+    "author": "leGO9",
+    "level": 1,
+    "compatible": true,
+    "history": {
+      "v2.1": "功能增强版本：添加路径映射、请求合并、登录缓存、智能通知、自动依赖管理",
+      "v2.0": "纯Python gRPC版本：移除CLI依赖，直接使用gRPC通信"
+    }
   }
 }
