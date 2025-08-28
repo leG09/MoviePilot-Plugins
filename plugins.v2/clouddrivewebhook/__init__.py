@@ -50,8 +50,8 @@ class CloudDriveWebhook(_PluginBase):
         # gRPC相关
         self._channel = None
         self._stub = None
-        self._session_active = False
-        self._session_time = 0
+        self._token = None
+        self._token_time = 0
         self._login_lock = threading.Lock()
         
         # 请求合并相关
@@ -271,8 +271,8 @@ class CloudDriveWebhook(_PluginBase):
             self._channel.close()
             self._channel = None
             self._stub = None
-            self._session_active = False
-            self._session_time = 0
+            self._token = None
+            self._token_time = 0
 
     def _start_refresh_thread(self):
         """启动刷新线程"""
@@ -518,32 +518,23 @@ class CloudDriveWebhook(_PluginBase):
 
 
     def _login_to_clouddrive(self):
-        """登录到CloudDrive（基于会话的认证）"""
+        """登录到CloudDrive（基于token的认证）"""
         try:
             current_time = time.time()
             
-            # 检查现有会话是否仍然有效（30分钟有效期）
-            if (self._session_active and self._session_time > 0 and 
-                current_time - self._session_time < 1800 and 
-                self._channel and self._stub):  # 30分钟
-                logger.info("使用现有会话连接")
-                return True, "使用现有会话连接"
+            # 检查现有token是否仍然有效（30分钟有效期）
+            if (self._token and self._token_time > 0 and 
+                current_time - self._token_time < 1800):  # 30分钟
+                logger.info("使用现有token")
+                return True, "使用现有token"
             
-            # 如果会话过期或不存在，先尝试检查服务器端登录状态
-            logger.info("会话过期或不存在，检查服务器端登录状态")
-            if self._check_server_login_status():
-                logger.info("服务器端显示已登录，更新本地状态")
-                self._session_active = True
-                self._session_time = current_time
-                return True, "服务器端已登录"
-            else:
-                logger.info("服务器端显示未登录，需要重新登录")
+            logger.info("token过期或不存在，需要重新获取token")
             
             with self._login_lock:
                 # 双重检查，避免重复登录
-                if (self._session_active and self._session_time > 0 and 
-                    current_time - self._session_time < 1800):
-                    return True, "使用现有会话连接"
+                if (self._token and self._token_time > 0 and 
+                    current_time - self._token_time < 1800):
+                    return True, "使用现有token"
                 
                 # 验证配置
                 if not self._server_addr:
@@ -557,16 +548,6 @@ class CloudDriveWebhook(_PluginBase):
                 if not stub:
                     return False, "无法创建gRPC连接"
                 
-                # 再次检查服务器端登录状态（在锁内）
-                logger.info("在锁内再次检查服务器端登录状态")
-                if self._check_server_login_status():
-                    logger.info("服务器端显示已登录，跳过登录步骤")
-                    self._session_active = True
-                    self._session_time = current_time
-                    return True, "服务器端已登录"
-                else:
-                    logger.info("服务器端显示未登录，继续登录流程")
-                
                 # 导入protobuf消息
                 try:
                     import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
@@ -574,39 +555,28 @@ class CloudDriveWebhook(_PluginBase):
                     logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
                     return False, "未找到CloudDrive protobuf模块"
                 
-                # 创建登录请求
-                login_request = CloudDrive_pb2.UserLoginRequest(
+                # 创建token请求
+                token_request = CloudDrive_pb2.GetTokenRequest(
                     userName=self._username,
-                    password=self._password,
-                    synDataToCloud=False
+                    password=self._password
                 )
                 
-                logger.info(f"正在登录用户: {self._username}")
+                logger.info(f"正在获取token，用户: {self._username}")
                 
-                # 调用登录API
-                response = stub.Login(login_request)
+                # 调用GetToken API
+                response = stub.GetToken(token_request)
                 
-                logger.info(f"登录响应: success={response.success}, errorMessage={getattr(response, 'errorMessage', 'N/A')}")
+                logger.info(f"Token响应: success={response.success}")
                 
                 if response.success:
-                    self._session_active = True
-                    self._session_time = current_time
-                    logger.info("CloudDrive登录成功，会话已建立")
-                    return True, "登录成功"
+                    self._token = response.token
+                    self._token_time = current_time
+                    logger.info("CloudDrive token获取成功")
+                    return True, "token获取成功"
                 else:
-                    # 获取错误消息
                     error_message = getattr(response, 'errorMessage', 'Unknown error')
-                    logger.info(f"登录失败，错误消息: {error_message}")
-                    
-                    # 检查是否是"已经登录"的情况
-                    if "already login" in error_message.lower() or "already logged in" in error_message.lower():
-                        logger.info("CloudDrive已经登录，使用现有会话")
-                        self._session_active = True
-                        self._session_time = current_time
-                        return True, "已经登录"
-                    else:
-                        logger.error(f"CloudDrive登录失败: {error_message}")
-                        return False, error_message
+                    logger.error(f"CloudDrive token获取失败: {error_message}")
+                    return False, error_message
                     
         except grpc.RpcError as e:
             if "Cannot invoke RPC on closed channel" in str(e):
@@ -692,8 +662,11 @@ class CloudDriveWebhook(_PluginBase):
             
             logger.info(f"发送gRPC刷新请求: {directory_path}")
             
+            # 创建带token的metadata
+            metadata = [('authorization', f'Bearer {self._token}')]
+            
             # 调用GetSubFiles API进行刷新
-            response_stream = stub.GetSubFiles(refresh_request)
+            response_stream = stub.GetSubFiles(refresh_request, metadata=metadata)
             
             # 读取响应流
             file_count = 0
@@ -809,28 +782,33 @@ class CloudDriveWebhook(_PluginBase):
 
     def _check_server_login_status(self) -> bool:
         """
-        检查服务器端登录状态
+        检查服务器端登录状态（使用token）
         
         Returns:
             bool: 是否已登录
         """
         try:
+            if not self._token:
+                return False
+            
             stub = self._get_grpc_stub()
             if not stub:
                 return False
             
             # 尝试调用一个需要登录的API来检查状态
             try:
-                import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
                 from google.protobuf import empty_pb2
                 
+                # 创建带token的metadata
+                metadata = [('authorization', f'Bearer {self._token}')]
+                
                 # 尝试获取账户状态
-                response = stub.GetAccountStatus(empty_pb2.Empty())
+                response = stub.GetAccountStatus(empty_pb2.Empty(), metadata=metadata)
                 logger.info("服务器端登录状态检查成功")
                 return True
             except grpc.RpcError as e:
                 if e.code() == grpc.StatusCode.UNAUTHENTICATED:
-                    logger.info("服务器端显示未登录")
+                    logger.info("token无效或已过期")
                     return False
                 else:
                     logger.warning(f"检查登录状态时发生错误: {e.code()} - {e.details()}")
