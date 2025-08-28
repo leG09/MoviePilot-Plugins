@@ -50,8 +50,8 @@ class CloudDriveWebhook(_PluginBase):
         # gRPC相关
         self._channel = None
         self._stub = None
-        self._token = None
-        self._login_time = 0
+        self._session_active = False
+        self._session_time = 0
         self._login_lock = threading.Lock()
         
         # 请求合并相关
@@ -271,6 +271,8 @@ class CloudDriveWebhook(_PluginBase):
             self._channel.close()
             self._channel = None
             self._stub = None
+            self._session_active = False
+            self._session_time = 0
 
     def _start_refresh_thread(self):
         """启动刷新线程"""
@@ -443,16 +445,9 @@ class CloudDriveWebhook(_PluginBase):
                     need_new_channel = True
                     logger.info("gRPC通道或stub为空，需要重新创建")
                 else:
-                    # 检查通道状态
-                    try:
-                        state = self._channel.get_state(try_to_connect=False)
-                        logger.debug(f"当前gRPC通道状态: {state}")
-                        if state in [grpc.ChannelConnectivity.SHUTDOWN, grpc.ChannelConnectivity.TRANSIENT_FAILURE]:
-                            need_new_channel = True
-                            logger.info(f"gRPC通道状态异常({state})，需要重新创建")
-                    except Exception as e:
-                        logger.warning(f"检查gRPC通道状态失败: {str(e)}")
-                        need_new_channel = True
+                    # 简单检查：如果通道和stub都存在，就认为是可用的
+                    # 如果实际调用时遇到错误，会在错误处理中重新创建
+                    logger.debug("gRPC通道和stub都存在，跳过重新创建")
             
             if need_new_channel:
                 logger.info("开始重新创建gRPC连接")
@@ -523,30 +518,32 @@ class CloudDriveWebhook(_PluginBase):
 
 
     def _login_to_clouddrive(self):
-        """登录到CloudDrive（带缓存）"""
+        """登录到CloudDrive（基于会话的认证）"""
         try:
-            # 检查是否已经登录且token未过期（30分钟有效期）
             current_time = time.time()
-            if (self._token and self._login_time > 0 and 
-                current_time - self._login_time < 1800):  # 30分钟
-                logger.info("使用缓存的登录状态")
-                return True, "使用缓存的登录状态"
             
-            # 如果缓存过期，先尝试检查服务器端登录状态
-            logger.info("缓存已过期，检查服务器端登录状态")
+            # 检查现有会话是否仍然有效（30分钟有效期）
+            if (self._session_active and self._session_time > 0 and 
+                current_time - self._session_time < 1800 and 
+                self._channel and self._stub):  # 30分钟
+                logger.info("使用现有会话连接")
+                return True, "使用现有会话连接"
+            
+            # 如果会话过期或不存在，先尝试检查服务器端登录状态
+            logger.info("会话过期或不存在，检查服务器端登录状态")
             if self._check_server_login_status():
                 logger.info("服务器端显示已登录，更新本地状态")
-                self._token = "logged_in"
-                self._login_time = current_time
+                self._session_active = True
+                self._session_time = current_time
                 return True, "服务器端已登录"
             else:
                 logger.info("服务器端显示未登录，需要重新登录")
             
             with self._login_lock:
                 # 双重检查，避免重复登录
-                if (self._token and self._login_time > 0 and 
-                    current_time - self._login_time < 1800):
-                    return True, "使用缓存的登录状态"
+                if (self._session_active and self._session_time > 0 and 
+                    current_time - self._session_time < 1800):
+                    return True, "使用现有会话连接"
                 
                 # 验证配置
                 if not self._server_addr:
@@ -564,8 +561,8 @@ class CloudDriveWebhook(_PluginBase):
                 logger.info("在锁内再次检查服务器端登录状态")
                 if self._check_server_login_status():
                     logger.info("服务器端显示已登录，跳过登录步骤")
-                    self._token = "logged_in"
-                    self._login_time = current_time
+                    self._session_active = True
+                    self._session_time = current_time
                     return True, "服务器端已登录"
                 else:
                     logger.info("服务器端显示未登录，继续登录流程")
@@ -592,9 +589,9 @@ class CloudDriveWebhook(_PluginBase):
                 logger.info(f"登录响应: success={response.success}, errorMessage={getattr(response, 'errorMessage', 'N/A')}")
                 
                 if response.success:
-                    self._token = "logged_in"  # 简化token管理
-                    self._login_time = current_time
-                    logger.info("CloudDrive登录成功")
+                    self._session_active = True
+                    self._session_time = current_time
+                    logger.info("CloudDrive登录成功，会话已建立")
                     return True, "登录成功"
                 else:
                     # 获取错误消息
@@ -604,8 +601,8 @@ class CloudDriveWebhook(_PluginBase):
                     # 检查是否是"已经登录"的情况
                     if "already login" in error_message.lower() or "already logged in" in error_message.lower():
                         logger.info("CloudDrive已经登录，使用现有会话")
-                        self._token = "logged_in"
-                        self._login_time = current_time
+                        self._session_active = True
+                        self._session_time = current_time
                         return True, "已经登录"
                     else:
                         logger.error(f"CloudDrive登录失败: {error_message}")
@@ -634,15 +631,15 @@ class CloudDriveWebhook(_PluginBase):
                         response = stub.Login(login_request)
                         
                         if response.success:
-                            self._token = "logged_in"
-                            self._login_time = time.time()
+                            self._session_active = True
+                            self._session_time = time.time()
                             logger.info("CloudDrive重新登录成功")
                             return True, "重新登录成功"
                         else:
                             error_message = getattr(response, 'errorMessage', 'Unknown error')
                             if "already login" in error_message.lower():
-                                self._token = "logged_in"
-                                self._login_time = time.time()
+                                self._session_active = True
+                                self._session_time = time.time()
                                 return True, "已经登录"
                             else:
                                 return False, error_message
