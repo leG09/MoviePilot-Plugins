@@ -485,6 +485,9 @@ class CloudDriveWebhook(_PluginBase):
             return self._stub
         except Exception as e:
             logger.error(f"创建gRPC stub失败: {str(e)}")
+            # 重置状态
+            self._channel = None
+            self._stub = None
             return None
 
 
@@ -578,6 +581,15 @@ class CloudDriveWebhook(_PluginBase):
                         logger.error(f"CloudDrive登录失败: {error_message}")
                         return False, error_message
                     
+        except grpc.RpcError as e:
+            if "Cannot invoke RPC on closed channel" in str(e):
+                logger.warning("gRPC通道已关闭，重置连接状态")
+                self._channel = None
+                self._stub = None
+                self._token = None
+                self._login_time = 0
+            logger.error(f"登录CloudDrive时发生gRPC错误: {str(e)}")
+            return False, str(e)
         except Exception as e:
             logger.error(f"登录CloudDrive时发生错误: {str(e)}")
             return False, str(e)
@@ -636,6 +648,10 @@ class CloudDriveWebhook(_PluginBase):
             }
                 
         except grpc.RpcError as e:
+            if "Cannot invoke RPC on closed channel" in str(e):
+                logger.warning("gRPC通道已关闭，重置连接状态")
+                self._channel = None
+                self._stub = None
             error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
