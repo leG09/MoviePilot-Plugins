@@ -83,6 +83,13 @@ class CloudDriveWebhook(_PluginBase):
                 "methods": ["POST"],
                 "summary": "CloudDrive目录刷新Webhook",
                 "description": "接收文件路径，通过gRPC直接刷新该文件所在的上一级目录"
+            },
+            {
+                "path": "/test_connection",
+                "endpoint": self.test_connection,
+                "methods": ["GET"],
+                "summary": "测试CloudDrive连接",
+                "description": "测试CloudDrive服务器连接和登录"
             }
         ]
 
@@ -383,7 +390,9 @@ class CloudDriveWebhook(_PluginBase):
                 return {"success": False, "message": "文件路径不能为空"}
             
             # 映射文件路径
+            logger.info(f"原始文件路径: {file_path}")
             mapped_file_path = self._map_file_path(file_path.strip())
+            logger.info(f"映射后文件路径: {mapped_file_path}")
             
             # 获取文件路径对象
             file_path_obj = Path(mapped_file_path)
@@ -425,8 +434,29 @@ class CloudDriveWebhook(_PluginBase):
     def _get_grpc_stub(self):
         """获取gRPC stub"""
         try:
-            if self._channel is None or self._channel.closed():
-                # 创建gRPC通道
+            # 检查通道是否需要重新创建
+            need_new_channel = False
+            if self._channel is None:
+                need_new_channel = True
+            else:
+                # 检查通道状态
+                try:
+                    # 尝试获取通道状态
+                    state = self._channel.get_state(try_to_connect=True)
+                    if state == grpc.ChannelConnectivity.SHUTDOWN:
+                        need_new_channel = True
+                except Exception:
+                    need_new_channel = True
+            
+            if need_new_channel:
+                # 关闭旧通道
+                if self._channel:
+                    try:
+                        self._channel.close()
+                    except Exception:
+                        pass
+                
+                # 创建新的gRPC通道
                 if self._use_ssl:
                     self._channel = grpc.secure_channel(self._server_addr, grpc.ssl_channel_credentials())
                 else:
@@ -437,6 +467,7 @@ class CloudDriveWebhook(_PluginBase):
                     # 尝试导入已生成的protobuf模块
                     import clouddrive.CloudDrive_pb2_grpc as CloudDrive_grpc_pb2_grpc
                     self._stub = CloudDrive_grpc_pb2_grpc.CloudDriveFileSrvStub(self._channel)
+                    logger.info(f"成功创建gRPC连接: {self._server_addr}")
                 except ImportError:
                     # 如果protobuf模块不存在，返回错误
                     logger.error("未找到CloudDrive protobuf模块，请确保protobuf文件已正确生成")
@@ -465,13 +496,17 @@ class CloudDriveWebhook(_PluginBase):
                     current_time - self._login_time < 1800):
                     return True, "使用缓存的登录状态"
                 
+                # 验证配置
+                if not self._server_addr:
+                    return False, "服务器地址未配置"
+                if not self._username or not self._password:
+                    return False, "用户名或密码未配置"
+                
+                logger.info(f"尝试连接到CloudDrive服务器: {self._server_addr}")
+                
                 stub = self._get_grpc_stub()
                 if not stub:
                     return False, "无法创建gRPC连接"
-                
-                # 验证配置
-                if not self._username or not self._password:
-                    return False, "用户名或密码未配置"
                 
                 # 导入protobuf消息
                 try:
@@ -562,6 +597,60 @@ class CloudDriveWebhook(_PluginBase):
             return {"success": False, "message": error_msg}
         except Exception as e:
             error_msg = f"刷新目录时发生错误：{str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    def test_connection(self, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
+        """
+        测试CloudDrive连接
+        
+        Args:
+            apikey: API密钥
+            
+        Returns:
+            Dict: 测试结果
+        """
+        try:
+            logger.info("开始测试CloudDrive连接")
+            
+            # 检查配置
+            config_status = {
+                "server_addr": bool(self._server_addr),
+                "username": bool(self._username),
+                "password": bool(self._password),
+                "use_ssl": self._use_ssl,
+                "path_mappings": self._path_mappings
+            }
+            
+            if not self._server_addr or not self._username or not self._password:
+                return {
+                    "success": False,
+                    "message": "配置不完整",
+                    "config_status": config_status
+                }
+            
+            # 测试gRPC连接
+            stub = self._get_grpc_stub()
+            if not stub:
+                return {
+                    "success": False,
+                    "message": "无法创建gRPC连接",
+                    "config_status": config_status
+                }
+            
+            # 测试登录
+            login_success, login_message = self._login_to_clouddrive()
+            
+            return {
+                "success": login_success,
+                "message": login_message,
+                "config_status": config_status,
+                "server_addr": self._server_addr
+            }
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"测试连接时发生错误：{str(e)}\n{traceback.format_exc()}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
