@@ -1488,7 +1488,7 @@ class CloudDriveWebhook(_PluginBase):
                 
                 # 创建FileItem对象
                 file_item = FileItem(
-                    path=file_path_obj,
+                    path=str(file_path_obj),
                     size=file_path_obj.stat().st_size if file_path_obj.exists() else 0
                 )
                 
