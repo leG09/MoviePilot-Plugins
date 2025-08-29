@@ -6,6 +6,7 @@ import subprocess
 import threading
 import traceback
 import time
+import requests
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -62,11 +63,11 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件名称
     plugin_name = "多目录实时监控"
     # 插件描述
-    plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和网盘限制检测。"
+    plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发、网盘限制检测和转移前目录刷新。"
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.8.1" # 修复路径匹配问题，添加挂载路径映射配置
+    plugin_version = "2.9.0" # 添加转移前目录刷新功能
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -129,6 +130,11 @@ class GDCloudLinkMonitor(_PluginBase):
     _disabled_destinations: Dict[str, Dict[str, Any]] = {}  # 被禁用的目标目录
     _log_monitor_thread = None
     _recovery_thread = None
+    
+    # 目录刷新相关属性
+    _refresh_before_transfer = False  # 转移前是否刷新目录
+    _refresh_api_url = ""  # 刷新API地址
+    _refresh_api_key = ""  # 刷新API密钥
 
     def _save_state_to_file(self):
         """将轮询状态保存到文件"""
@@ -511,6 +517,78 @@ class GDCloudLinkMonitor(_PluginBase):
                 logger.error(f"恢复检查线程出错: {e}")
                 time.sleep(self._recovery_check_interval)
 
+    def _call_refresh_api(self, file_path: str) -> bool:
+        """
+        调用目录刷新API
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            bool: 是否成功
+        """
+        if not self._refresh_before_transfer:
+            logger.debug("目录刷新功能未启用，跳过")
+            return True
+            
+        if not self._refresh_api_url or not self._refresh_api_key:
+            logger.warning("目录刷新API配置不完整，跳过")
+            return True
+            
+        try:
+            # 构建请求URL
+            url = f"{self._refresh_api_url}/api/v1/plugin/CloudDriveWebhook/clouddrive_webhook"
+            
+            # 构建请求参数
+            params = {
+                "apikey": self._refresh_api_key,
+                "path_type": "source"
+            }
+            
+            # 构建请求数据
+            data = {
+                "data": [
+                    {
+                        "source_file": file_path
+                    }
+                ]
+            }
+            
+            logger.info(f"调用目录刷新API: {url}")
+            logger.debug(f"请求参数: {params}")
+            logger.debug(f"请求数据: {data}")
+            
+            # 发送请求
+            response = requests.post(
+                url=url,
+                params=params,
+                json=data,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    logger.info(f"目录刷新成功: {result.get('message', '')}")
+                    return True
+                else:
+                    logger.warning(f"目录刷新失败: {result.get('message', '未知错误')}")
+                    return False
+            else:
+                logger.error(f"目录刷新API请求失败，状态码: {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.error("目录刷新API请求超时")
+            return False
+        except requests.exceptions.RequestException as e:
+            logger.error(f"目录刷新API请求异常: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"调用目录刷新API时发生未知错误: {e}")
+            return False
+
     def _start_log_monitoring(self):
         """
         启动日志监控
@@ -588,6 +666,11 @@ class GDCloudLinkMonitor(_PluginBase):
             self._error_threshold = config.get("error_threshold", 3)
             self._recovery_check_interval = config.get("recovery_check_interval", 1800)
             self._mount_path_mapping = config.get("mount_path_mapping", "")
+            
+            # 目录刷新相关配置
+            self._refresh_before_transfer = config.get("refresh_before_transfer", False)
+            self._refresh_api_url = config.get("refresh_api_url", "")
+            self._refresh_api_key = config.get("refresh_api_key", "")
 
         # 停止现有任务
         self.stop_service()
@@ -736,6 +819,9 @@ class GDCloudLinkMonitor(_PluginBase):
             "error_threshold": self._error_threshold,
             "recovery_check_interval": self._recovery_check_interval,
             "mount_path_mapping": self._mount_path_mapping,
+            "refresh_before_transfer": self._refresh_before_transfer,
+            "refresh_api_url": self._refresh_api_url,
+            "refresh_api_key": self._refresh_api_key,
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -922,6 +1008,15 @@ class GDCloudLinkMonitor(_PluginBase):
                 if not target_dir.library_path:
                     logger.error(f"未配置监控目录 {mon_path} 的目的目录")
                     return
+
+                # 转移前调用目录刷新API
+                if self._refresh_before_transfer:
+                    logger.info(f"转移前调用目录刷新API: {event_path}")
+                    refresh_success = self._call_refresh_api(event_path)
+                    if not refresh_success:
+                        logger.warning(f"目录刷新失败，但继续执行文件转移: {event_path}")
+                    else:
+                        logger.info(f"目录刷新成功，准备转移文件: {event_path}")
 
                 # 转移文件
                 transferinfo: TransferInfo = self.chain.transfer(fileitem=file_item,
@@ -1376,6 +1471,33 @@ class GDCloudLinkMonitor(_PluginBase):
                             }]
                         }]
                     },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'refresh_before_transfer', 'label': '转移前刷新目录'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'refresh_api_url', 'label': '刷新API地址', 'placeholder': '请输入CloudDriveWebhook插件API地址'}
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'refresh_api_key', 'label': '刷新API密钥', 'placeholder': '请输入CloudDriveWebhook插件API密钥'}
+                                }]
+                            }
+                        ]
+                    },
                 ]
             }
         ], {
@@ -1383,7 +1505,8 @@ class GDCloudLinkMonitor(_PluginBase):
             "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "softlink",
             "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0,
             "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
-            "recovery_check_interval": 1800, "mount_path_mapping": ""
+            "recovery_check_interval": 1800, "mount_path_mapping": "",
+            "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": ""
         }
 
     def get_page(self) -> List[dict]:
