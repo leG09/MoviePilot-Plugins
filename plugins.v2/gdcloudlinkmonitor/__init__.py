@@ -260,6 +260,28 @@ class GDCloudLinkMonitor(_PluginBase):
             
         return mapping
 
+    def _convert_to_mount_path(self, file_path: str) -> str:
+        """
+        将实际文件路径转换为挂载路径格式
+        例如：/mnt/CloudDrive/gd3/media/3/... -> /gd3/media/3/...
+        """
+        if not self._mount_path_mapping:
+            return file_path
+            
+        mount_mapping = self._parse_mount_path_mapping()
+        
+        # 遍历映射，找到匹配的实际路径并转换为挂载路径
+        for mount_path, real_path in mount_mapping.items():
+            if file_path.startswith(real_path):
+                # 替换实际路径为挂载路径
+                converted_path = file_path.replace(real_path, mount_path, 1)
+                logger.debug(f"路径转换: {file_path} -> {converted_path}")
+                return converted_path
+                
+        # 如果没有找到匹配的映射，返回原路径
+        logger.debug(f"未找到匹配的路径映射，使用原路径: {file_path}")
+        return file_path
+
     def _find_matching_destinations(self, mount_path: str) -> List[str]:
         """
         根据日志中的挂载路径找到匹配的目标目录
@@ -1038,8 +1060,10 @@ class GDCloudLinkMonitor(_PluginBase):
                             target_path_obj = dest_dir_path / file_path.name
 
                         target_file_path = target_path_obj.as_posix()
-                        logger.info(f"转移前调用目录刷新API: {target_file_path}")
-                        refresh_success = self._call_refresh_api(target_file_path)
+                        # 转换为挂载路径格式（用于CloudDrive API）
+                        mount_file_path = self._convert_to_mount_path(target_file_path)
+                        logger.info(f"转移前调用目录刷新API: {mount_file_path} (原路径: {target_file_path})")
+                        refresh_success = self._call_refresh_api(mount_file_path)
                         if not refresh_success:
                             logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
                         else:
