@@ -1013,8 +1013,15 @@ class GDCloudLinkMonitor(_PluginBase):
                 if self._refresh_before_transfer:
                     # 构建目标文件路径
                     try:
-                        # 使用目标目录路径作为刷新路径
-                        target_file_path = str(target_dir.library_path)
+                        # 获取目标目录配置
+                        target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
+                        if target_dir_conf and target_dir_conf.download_path:
+                            # 构建完整的目标文件路径
+                            target_file_path = str(target_dir.library_path / target_dir_conf.download_path.name / file_path.name)
+                        else:
+                            # 如果无法获取目标目录配置，使用目标目录路径
+                            target_file_path = str(target_dir.library_path)
+                        
                         logger.info(f"转移前调用目录刷新API: {target_file_path}")
                         refresh_success = self._call_refresh_api(target_file_path)
                         if not refresh_success:
