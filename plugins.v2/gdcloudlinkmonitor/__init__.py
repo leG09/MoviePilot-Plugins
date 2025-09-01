@@ -31,6 +31,7 @@ from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.directory import DirectoryHelper
 from app.log import logger
 from app.modules.filemanager import FileManagerModule
+from app.modules.filemanager.transhandler import TransHandler
 from app.plugins import _PluginBase
 from app.schemas import NotificationType, TransferInfo, TransferDirectoryConf
 from app.schemas.types import EventType, MediaType, SystemConfigKey
@@ -1009,24 +1010,42 @@ class GDCloudLinkMonitor(_PluginBase):
                     logger.error(f"未配置监控目录 {mon_path} 的目的目录")
                     return
 
-                # 转移前调用目录刷新API（使用目标路径）
+                # 转移前调用目录刷新API（使用目标文件完整路径，与transhandler保持一致）
                 if self._refresh_before_transfer:
-                    # 构建目标文件路径
                     try:
-                        # 获取目标目录配置
-                        target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
-                        if target_dir_conf and target_dir_conf.download_path:
-                            # 构建完整的目标文件路径，参考transhandler.py的逻辑
-                            target_file_path = str(target_dir.library_path / target_dir_conf.download_path.name / file_path.name)
-                            logger.info(f"转移前调用目录刷新API: {target_file_path}")
-                            refresh_success = self._call_refresh_api(target_file_path)
-                            if not refresh_success:
-                                logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
-                            else:
-                                logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
+                        handler = TransHandler()
+                        # 1) 与整理一致地计算目标目录（含类型/分类）
+                        dest_dir_path = handler.get_dest_dir(
+                            mediainfo=mediainfo,
+                            target_dir=target_dir,
+                            need_type_folder=False,
+                            need_category_folder=target_dir.library_category_folder
+                        )
+                        # 2) 与整理一致地生成最终目标文件路径
+                        if target_dir.renaming:
+                            rename_format = settings.RENAME_FORMAT(mediainfo.type)
+                            target_path_obj = handler.get_rename_path(
+                                path=dest_dir_path,
+                                template_string=rename_format,
+                                rename_dict=handler.get_naming_dict(
+                                    meta=file_meta,
+                                    mediainfo=mediainfo,
+                                    episodes_info=episodes_info,
+                                    file_ext=file_path.suffix
+                                )
+                            )
+                        else:
+                            target_path_obj = dest_dir_path / file_path.name
+
+                        target_file_path = target_path_obj.as_posix()
+                        logger.info(f"转移前调用目录刷新API: {target_file_path}")
+                        refresh_success = self._call_refresh_api(target_file_path)
+                        if not refresh_success:
+                            logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
+                        else:
+                            logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
                     except Exception as e:
                         logger.warning(f"构建目标路径失败，跳过目录刷新: {e}")
-                        refresh_success = True  # 继续执行转移
 
                 # 转移文件
                 transferinfo: TransferInfo = self.chain.transfer(fileitem=file_item,
