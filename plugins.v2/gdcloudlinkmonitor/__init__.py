@@ -343,6 +343,7 @@ class GDCloudLinkMonitor(_PluginBase):
                 
         try:
             file_size = log_file.stat().st_size
+            logger.debug(f"日志文件大小：{file_size} bytes")
             
             with open(log_file, 'r', encoding='utf-8') as f:
                 # 只读取最近的内容，避免处理过大的日志文件
@@ -555,7 +556,7 @@ class GDCloudLinkMonitor(_PluginBase):
             
             logger.info(f"调用目录刷新API: {url}")
             logger.debug(f"请求参数: {params}")
-            logger.info(f"请求数据: {data}")
+            logger.debug(f"请求数据: {data}")
             
             # 发送请求
             response = requests.post(
@@ -935,6 +936,7 @@ class GDCloudLinkMonitor(_PluginBase):
 
                 # 判断文件大小
                 if self._size and float(self._size) > 0 and file_path.stat().st_size < float(self._size) * 1024 ** 3:
+                    logger.info(f"{file_path} 文件大小小于监控文件大小，不处理")
                     return
 
                 # 查找这个文件项
@@ -1014,32 +1016,18 @@ class GDCloudLinkMonitor(_PluginBase):
                         # 获取目标目录配置
                         target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
                         if target_dir_conf and target_dir_conf.download_path:
-                            # 参考transfer.py的代码，使用dest_path来获取目标目录
-                            target_dir_info = DirectoryHelper().get_dir(media=mediainfo,
-                                                                      dest_path=target_dir.library_path,
-                                                                      target_storage="local")
-                            if target_dir_info and target_dir_info.download_path:
-                                # 构建完整的目标文件路径
-                                target_file_path = str(target_dir_info.download_path)
-                                logger.info(f"转移前调用目录刷新API: {target_file_path}")
-                                refresh_success = self._call_refresh_api(target_file_path)
-                                if not refresh_success:
-                                    logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
-                                else:
-                                    logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
-                            else:
-                                # 如果无法获取目标目录信息，使用目标目录路径
-                                target_file_path = str(target_dir.library_path)
-                                logger.info(f"转移前调用目录刷新API: {target_file_path}")
-                                refresh_success = self._call_refresh_api(target_file_path)
-                                if not refresh_success:
-                                    logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
-                                else:
-                                    logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
+                            # 构建完整的目标文件路径
+                            target_file_path = str(target_dir.library_path / target_dir_conf.download_path.name / file_path.name)
                         else:
-                            # 如果无法获取目标目录配置，跳过目录刷新
-                            logger.debug(f"无法获取目标目录配置，跳过目录刷新: {mediainfo.title_year}")
-                            refresh_success = True  # 继续执行转移
+                            refresh_success = True
+                            return
+                        
+                        logger.info(f"转移前调用目录刷新API: {target_file_path}")
+                        refresh_success = self._call_refresh_api(target_file_path)
+                        if not refresh_success:
+                            logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
+                        else:
+                            logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
                     except Exception as e:
                         logger.warning(f"构建目标路径失败，跳过目录刷新: {e}")
                         refresh_success = True  # 继续执行转移
