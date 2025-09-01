@@ -1016,7 +1016,7 @@ class GDCloudLinkMonitor(_PluginBase):
                         # 获取目标目录配置
                         target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
                         if target_dir_conf and target_dir_conf.download_path:
-                            # 构建完整的目标文件路径
+                            # 构建完整的目标文件路径，参考transhandler.py的逻辑
                             target_file_path = str(target_dir.library_path / target_dir_conf.download_path.name / file_path.name)
                             logger.info(f"转移前调用目录刷新API: {target_file_path}")
                             refresh_success = self._call_refresh_api(target_file_path)
@@ -1024,8 +1024,6 @@ class GDCloudLinkMonitor(_PluginBase):
                                 logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
                             else:
                                 logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
-                        else:
-                            refresh_success = True                
                     except Exception as e:
                         logger.warning(f"构建目标路径失败，跳过目录刷新: {e}")
                         refresh_success = True  # 继续执行转移
