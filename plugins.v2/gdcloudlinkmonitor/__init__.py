@@ -1017,7 +1017,8 @@ class GDCloudLinkMonitor(_PluginBase):
                         target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
                         if target_dir_conf and target_dir_conf.download_path:
                             # 构建完整的目标文件路径
-                            target_file_path = str(target_dir.library_path / target_dir_conf.download_path.name / file_path.name)
+                            # 使用目标目录路径作为刷新路径，因为我们需要刷新整个目标目录
+                            target_file_path = str(target_dir.library_path)
                             logger.info(f"转移前调用目录刷新API: {target_file_path}")
                             refresh_success = self._call_refresh_api(target_file_path)
                             if not refresh_success:
