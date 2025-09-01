@@ -550,10 +550,11 @@ class CloudDriveWebhook(_PluginBase):
                         logger.error(f"处理源路径目录时发生错误: {str(e)}")
                         failed_files.append({"index": i, "reason": "processing_error", "error": str(e)})
 
-                # source模式：直接刷新所有源目录，不进行合并
-                for directory in sorted(list(source_directories)):
+                # 合并重合目录并刷新（不发送通知）
+                merged_dirs = self._merge_overlapping_directories(sorted(list(source_directories)), {})
+                for directory in merged_dirs:
                     try:
-                        logger.info(f"执行源模式刷新: {directory}")
+                        logger.info(f"执行源模式合并刷新: {directory}")
                         _ = self._refresh_directory_via_grpc(directory)
                     except Exception as e:
                         logger.error(f"刷新目录 {directory} 时发生错误: {str(e)}")
@@ -561,9 +562,9 @@ class CloudDriveWebhook(_PluginBase):
                 logger.info(f"=== 源模式处理完成 ===")
                 return {
                     "success": True,
-                    "message": f"源模式刷新完成，目录数: {len(source_directories)}，失败: {len(failed_files)}",
+                    "message": f"源模式刷新完成，目录数: {len(merged_dirs)}，失败: {len(failed_files)}",
                     "path_type": path_type,
-                    "refreshed_directories": sorted(list(source_directories)),
+                    "refreshed_directories": merged_dirs,
                     "failed_files": failed_files
                 }
 
