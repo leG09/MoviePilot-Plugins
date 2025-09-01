@@ -1012,13 +1012,18 @@ class GDCloudLinkMonitor(_PluginBase):
                 # 转移前调用目录刷新API（使用目标路径）
                 if self._refresh_before_transfer:
                     # 构建目标文件路径
-                    target_file_path = str(target_dir.library_path / DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path)).download_path.name)
-                    logger.info(f"转移前调用目录刷新API: {target_file_path}")
-                    refresh_success = self._call_refresh_api(target_file_path)
-                    if not refresh_success:
-                        logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
-                    else:
-                        logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
+                    try:
+                        # 使用目标目录路径作为刷新路径
+                        target_file_path = str(target_dir.library_path)
+                        logger.info(f"转移前调用目录刷新API: {target_file_path}")
+                        refresh_success = self._call_refresh_api(target_file_path)
+                        if not refresh_success:
+                            logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
+                        else:
+                            logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
+                    except Exception as e:
+                        logger.warning(f"构建目标路径失败，跳过目录刷新: {e}")
+                        refresh_success = True  # 继续执行转移
 
                 # 转移文件
                 transferinfo: TransferInfo = self.chain.transfer(fileitem=file_item,
