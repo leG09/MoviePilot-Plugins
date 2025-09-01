@@ -1018,16 +1018,16 @@ class GDCloudLinkMonitor(_PluginBase):
                         if target_dir_conf and target_dir_conf.download_path:
                             # 构建完整的目标文件路径
                             target_file_path = str(target_dir.library_path / target_dir_conf.download_path.name / file_path.name)
+                            logger.info(f"转移前调用目录刷新API: {target_file_path}")
+                            refresh_success = self._call_refresh_api(target_file_path)
+                            if not refresh_success:
+                                logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
+                            else:
+                                logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
                         else:
-                            # 如果无法获取目标目录配置，使用目标目录路径
-                            target_file_path = str(target_dir.library_path)
-                        
-                        logger.info(f"转移前调用目录刷新API: {target_file_path}")
-                        refresh_success = self._call_refresh_api(target_file_path)
-                        if not refresh_success:
-                            logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
-                        else:
-                            logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
+                            # 如果无法获取目标目录配置，跳过目录刷新
+                            logger.debug(f"无法获取目标目录配置，跳过目录刷新: {mediainfo.title_year}")
+                            refresh_success = True  # 继续执行转移
                     except Exception as e:
                         logger.warning(f"构建目标路径失败，跳过目录刷新: {e}")
                         refresh_success = True  # 继续执行转移
