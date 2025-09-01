@@ -437,11 +437,6 @@ class CloudDriveWebhook(_PluginBase):
             return file_path, True
         
         mapped_path = file_path
-        if path_type == "source":
-            logger.info(f"[源模式] 开始路径映射，原始路径: {file_path}")
-        else:
-            logger.info(f"开始路径映射，原始路径: {file_path}")
-        logger.info(f"当前路径映射配置: {self._path_mappings}")
         
         # 解析路径映射配置
         mapping_applied = False
@@ -455,24 +450,14 @@ class CloudDriveWebhook(_PluginBase):
                 source_path = source_path.strip()
                 target_path = target_path.strip()
                 
-                if path_type == "source":
-                    logger.info(f"[源模式] 检查映射规则: {source_path} => {target_path}")
-                else:
-                    logger.info(f"检查映射规则: {source_path} => {target_path}")
-                
                 if file_path.startswith(source_path):
                     mapped_path = file_path.replace(source_path, target_path, 1)
                     if path_type == "source":
-                        logger.info(f"[源模式] 路径映射成功: {file_path} => {mapped_path}")
+                        logger.info(f"[源模式] 路径映射成功: {file_path} => {mapped_path} (规则: {source_path} => {target_path})")
                     else:
-                        logger.info(f"路径映射成功: {file_path} => {mapped_path}")
+                        logger.info(f"路径映射成功: {file_path} => {mapped_path} (规则: {source_path} => {target_path})")
                     mapping_applied = True
                     break
-                else:
-                    if path_type == "source":
-                        logger.debug(f"[源模式] 路径不匹配: {file_path} 不以 {source_path} 开头")
-                    else:
-                        logger.debug(f"路径不匹配: {file_path} 不以 {source_path} 开头")
             except Exception as e:
                 logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
         
@@ -483,10 +468,6 @@ class CloudDriveWebhook(_PluginBase):
                 logger.warning(f"路径映射失败，跳过处理: {file_path}")
             return file_path, False
         else:
-            if path_type == "source":
-                logger.info(f"[源模式] 最终映射路径: {mapped_path}")
-            else:
-                logger.info(f"最终映射路径: {mapped_path}")
             return mapped_path, True
 
     def clouddrive_webhook(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
