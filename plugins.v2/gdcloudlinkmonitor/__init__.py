@@ -541,12 +541,12 @@ class GDCloudLinkMonitor(_PluginBase):
             
             # 构建请求参数
             params = {
-                "apikey": self._refresh_api_key,
-                "path_type": "source"
+                "apikey": self._refresh_api_key
             }
             
             # 构建请求数据
             data = {
+                "path_type": "source",
                 "data": [
                     {
                         "source_file": file_path
