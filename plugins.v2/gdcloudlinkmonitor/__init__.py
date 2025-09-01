@@ -133,7 +133,7 @@ class GDCloudLinkMonitor(_PluginBase):
     
     # 目录刷新相关属性
     _refresh_before_transfer = False  # 转移前是否刷新目录
-    _refresh_api_url = ""  # 刷新API地址
+    _refresh_api_url = ""  # 刷新API完整地址
     _refresh_api_key = ""  # 刷新API密钥
 
     def _save_state_to_file(self):
@@ -536,8 +536,8 @@ class GDCloudLinkMonitor(_PluginBase):
             return True
             
         try:
-            # 构建请求URL
-            url = f"{self._refresh_api_url}/api/v1/plugin/CloudDriveWebhook/clouddrive_webhook"
+            # 使用配置的完整API URL
+            url = self._refresh_api_url
             
             # 构建请求参数
             params = {
@@ -1485,7 +1485,7 @@ class GDCloudLinkMonitor(_PluginBase):
                                 'props': {'cols': 12, 'md': 4},
                                 'content': [{
                                     'component': 'VTextField',
-                                    'props': {'model': 'refresh_api_url', 'label': '刷新API地址', 'placeholder': '请输入CloudDriveWebhook插件API地址'}
+                                    'props': {'model': 'refresh_api_url', 'label': '刷新API完整地址', 'placeholder': '请输入完整的CloudDriveWebhook API地址，如：http://server:port/api/v1/plugin/CloudDriveWebhook/clouddrive_webhook'}
                                 }]
                             },
                             {
