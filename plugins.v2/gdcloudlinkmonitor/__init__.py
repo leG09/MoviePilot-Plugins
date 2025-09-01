@@ -1009,14 +1009,16 @@ class GDCloudLinkMonitor(_PluginBase):
                     logger.error(f"未配置监控目录 {mon_path} 的目的目录")
                     return
 
-                # 转移前调用目录刷新API
+                # 转移前调用目录刷新API（使用目标路径）
                 if self._refresh_before_transfer:
-                    logger.info(f"转移前调用目录刷新API: {event_path}")
-                    refresh_success = self._call_refresh_api(event_path)
+                    # 构建目标文件路径
+                    target_file_path = str(target_dir.library_path / DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path)).download_path.name)
+                    logger.info(f"转移前调用目录刷新API: {target_file_path}")
+                    refresh_success = self._call_refresh_api(target_file_path)
                     if not refresh_success:
-                        logger.warning(f"目录刷新失败，但继续执行文件转移: {event_path}")
+                        logger.warning(f"目录刷新失败，但继续执行文件转移: {target_file_path}")
                     else:
-                        logger.info(f"目录刷新成功，准备转移文件: {event_path}")
+                        logger.info(f"目录刷新成功，准备转移文件: {target_file_path}")
 
                 # 转移文件
                 transferinfo: TransferInfo = self.chain.transfer(fileitem=file_item,
