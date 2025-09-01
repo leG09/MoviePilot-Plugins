@@ -556,7 +556,7 @@ class GDCloudLinkMonitor(_PluginBase):
             
             logger.info(f"调用目录刷新API: {url}")
             logger.debug(f"请求参数: {params}")
-            logger.debug(f"请求数据: {data}")
+            logger.info(f"请求数据: {data}")
             
             # 发送请求
             response = requests.post(
