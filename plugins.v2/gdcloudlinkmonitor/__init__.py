@@ -648,7 +648,7 @@ class GDCloudLinkMonitor(_PluginBase):
     def init_plugin(self, config: dict = None):
         self.transferhis = TransferHistoryOper()
         self.downloadhis = DownloadHistoryOper()
-        self.transferchian = TransferChain()
+        self.transferchain = TransferChain()
         self.tmdbchain = TmdbChain()
         self.mediaChain = MediaChain()
         self.storagechain = StorageChain()
@@ -725,6 +725,9 @@ class GDCloudLinkMonitor(_PluginBase):
                 if mon_path_conf.count("#") == 1:
                     _transfer_type = mon_path_conf.split("#")[1]
                     mon_path_conf = mon_path_conf.split("#")[0]
+                    logger.info(f"监控目录 {mon_path_conf} 使用自定义转移方式: {_transfer_type}")
+                else:
+                    logger.info(f"监控目录 {mon_path_conf} 使用默认转移方式: {_transfer_type}")
                 
                 paths = mon_path_conf.split(":", 1)
                 mon_path = ""
@@ -747,6 +750,7 @@ class GDCloudLinkMonitor(_PluginBase):
                     
                 self._transferconf[mon_path] = _transfer_type
                 self._overwrite_mode[mon_path] = _overwrite_mode
+                logger.info(f"监控目录 {mon_path} 最终配置 - 转移方式: {_transfer_type}, 覆盖模式: {_overwrite_mode}")
 
                 # 启用目录监控
                 if self._enabled:
@@ -1002,6 +1006,7 @@ class GDCloudLinkMonitor(_PluginBase):
 
                 # 查询转移方式
                 transfer_type = self._transferconf.get(mon_path)
+                logger.info(f"监控目录 {mon_path} 配置的转移方式: {transfer_type}")
 
                 # 获取集数据
                 if mediainfo.type == MediaType.TV:
@@ -1027,6 +1032,10 @@ class GDCloudLinkMonitor(_PluginBase):
                     target_dir.library_path = target
                     target_dir.transfer_type = transfer_type
                     target_dir.scraping = self._scrape
+                
+                # 确保转移方式正确设置
+                logger.info(f"最终使用的转移方式: {target_dir.transfer_type}")
+                logger.info(f"目标目录配置: {target_dir.library_path}")
                 
                 if not target_dir.library_path:
                     logger.error(f"未配置监控目录 {mon_path} 的目的目录")
@@ -1072,7 +1081,8 @@ class GDCloudLinkMonitor(_PluginBase):
                         logger.warning(f"构建目标路径失败，跳过目录刷新: {e}")
 
                 # 转移文件
-                transferinfo: TransferInfo = self.chain.transfer(fileitem=file_item,
+                logger.info(f"开始执行文件转移，转移方式: {target_dir.transfer_type}")
+                transferinfo: TransferInfo = self.transferchain.transfer(fileitem=file_item,
                                                                  meta=file_meta,
                                                                  mediainfo=mediainfo,
                                                                  target_directory=target_dir,
@@ -1103,6 +1113,18 @@ class GDCloudLinkMonitor(_PluginBase):
                             image=mediainfo.get_message_image()
                         )
                     return
+                
+                # 转移成功，记录详细信息
+                logger.info(f"文件转移成功: {file_path} -> {transferinfo.target_item.path if transferinfo.target_item else '未知'}")
+                logger.info(f"转移方式: {transferinfo.mode if hasattr(transferinfo, 'mode') else '未知'}")
+                
+                # 检查移动模式下源文件是否还存在
+                if transfer_type == "move":
+                    if file_path.exists():
+                        logger.warning(f"移动模式转移成功，但源文件仍然存在: {file_path}")
+                        logger.warning("这可能表明转移链没有正确执行移动操作")
+                    else:
+                        logger.info(f"移动模式转移成功，源文件已删除: {file_path}")
 
                 if self._history:
                     # 新增转移成功历史记录
@@ -1189,14 +1211,29 @@ class GDCloudLinkMonitor(_PluginBase):
 
                 # 移动模式删除空目录
                 if transfer_type == "move":
-                    for file_dir in file_path.parents:
-                        if len(str(file_dir)) <= len(str(Path(mon_path))):
-                            # 重要，删除到监控目录为止
-                            break
-                        files = SystemUtils.list_files(file_dir, settings.RMT_MEDIAEXT + settings.DOWNLOAD_TMPEXT)
-                        if not files:
-                            logger.warn(f"移动模式，删除空目录：{file_dir}")
-                            shutil.rmtree(file_dir, ignore_errors=True)
+                    logger.info(f"移动模式，开始检查并删除空目录，源文件: {file_path}")
+                    try:
+                        # 从文件所在目录开始，逐级向上检查
+                        current_dir = file_path.parent
+                        while current_dir and str(current_dir) != str(Path(mon_path)) and len(str(current_dir)) > len(str(Path(mon_path))):
+                            # 检查当前目录是否为空（只检查媒体文件和临时文件）
+                            files = SystemUtils.list_files(current_dir, settings.RMT_MEDIAEXT + settings.DOWNLOAD_TMPEXT)
+                            if not files:
+                                logger.info(f"移动模式，删除空目录：{current_dir}")
+                                try:
+                                    shutil.rmtree(current_dir, ignore_errors=True)
+                                    logger.info(f"成功删除空目录：{current_dir}")
+                                except Exception as e:
+                                    logger.error(f"删除空目录失败：{current_dir}, 错误: {e}")
+                            else:
+                                logger.debug(f"目录 {current_dir} 还有 {len(files)} 个文件，不删除")
+                                break
+                            # 向上移动到父目录
+                            current_dir = current_dir.parent
+                    except Exception as e:
+                        logger.error(f"移动模式删除空目录时出错: {e}")
+                        import traceback
+                        logger.debug(f"错误详情: {traceback.format_exc()}")
 
         except Exception as e:
             logger.error("目录监控发生错误：%s - %s" % (str(e), traceback.format_exc()))
@@ -1257,7 +1294,7 @@ class GDCloudLinkMonitor(_PluginBase):
                         # 季集文本
                         season_episode = f"{file_meta.season} {StringUtils.format_ep(episodes)}"
                     # 发送消息
-                    self.transferchian.send_transfer_message(meta=file_meta,
+                    self.transferchain.send_transfer_message(meta=file_meta,
                                                              mediainfo=mediainfo,
                                                              transferinfo=transferinfo,
                                                              season_episode=season_episode)
