@@ -574,8 +574,8 @@ class QbOptimizer(_PluginBase):
                         'save_path': getattr(torrent, 'save_path', '') or getattr(torrent, 'content_path', '')
                     }
                     
-                    # 删除种子（保留文件）
-                    result = downloader_obj.delete_torrents(delete_file=False, ids=[torrent.hash])
+                    # 删除种子（不保留文件）
+                    result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
                     if result:
                         logger.info(f"【功能1-无人做种】删除审计-成功: {torrent.name} (HASH={getattr(torrent, 'hash', 'N/A')})，已保留数据文件")
                         # 重新下载逻辑
