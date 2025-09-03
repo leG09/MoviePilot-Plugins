@@ -28,10 +28,10 @@ class CloudDriveWebhook(_PluginBase):
     
     # 插件信息
     plugin_name = "CloudDriveWebhook"
-    plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录"
+    plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步"
     plugin_icon = "clouddrive.png"
     plugin_color = "#00BFFF"
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "clouddrivewebhook"
@@ -47,6 +47,7 @@ class CloudDriveWebhook(_PluginBase):
         self._password = config.get("password", "") if config else ""
         self._use_ssl = config.get("use_ssl", False) if config else False
         self._path_mappings = config.get("path_mappings", "") if config else ""
+        self._enable_sync = config.get("enable_sync", False) if config else False
         
         # gRPC相关
         self._channel = None
@@ -144,6 +145,20 @@ class CloudDriveWebhook(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "enable_sync",
+                                            "label": "启用文件同步",
+                                            "color": "primary"
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -159,6 +174,24 @@ class CloudDriveWebhook(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "text": "检查文件是否存在：启用后会在发送通知前通过gRPC检查文件是否真实存在于CloudDrive中。如果文件不存在，将跳过通知发送。"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "success",
+                                            "text": "文件同步功能：使用CloudDrive原生CopyFile API实现真正的文件复制，支持跨网盘文件同步。如果CopyFile API不可用，将自动回退到Backup API。"
                                         }
                                     }
                                 ]
@@ -266,9 +299,9 @@ class CloudDriveWebhook(_PluginBase):
                                         "props": {
                                             "model": "path_mappings",
                                             "label": "路径映射配置",
-                                            "placeholder": "每行一个映射，格式：源路径 => 目标路径\n例如：\n/gd5/media/ => /GoogleDrive2/media/\n/gd18/media/ => /GoogleDrive18/media/",
+                                            "placeholder": "每行一个映射，格式：源路径 => 目标路径[:同步目标1:同步目标2]\n例如：\n/gd10/media/ => /GoogleDrive2/media/:/115/media:/aliyun/media\n/gd5/media/ => /GoogleDrive5/media/",
                                             "rows": 5,
-                                            "hint": "用于将接收到的文件路径映射到实际的CloudDrive路径"
+                                            "hint": "用于将接收到的文件路径映射到实际的CloudDrive路径。启用同步后，文件将自动复制到冒号分隔的同步目标目录"
                                         }
                                     }
                                 ]
@@ -286,7 +319,8 @@ class CloudDriveWebhook(_PluginBase):
             "username": "",
             "password": "",
             "use_ssl": False,
-            "path_mappings": ""
+            "path_mappings": "",
+            "enable_sync": False
         }
 
     def get_page(self) -> list:
@@ -354,10 +388,15 @@ class CloudDriveWebhook(_PluginBase):
                         if result["success"]:
                             logger.info(f"目录 {directory} 刷新成功")
                             
-                            # 刷新成功后，检查该目录下的所有文件并发送通知
-                            if self._send_notification and directory in directory_files:
-                                logger.info(f"目录刷新成功，准备发送 {len(directory_files[directory])} 个文件的通知")
-                                self._send_notifications_for_files(directory_files[directory])
+                            # 刷新成功后，检查该目录下的所有文件并执行同步
+                            if directory in directory_files:
+                                logger.info(f"目录刷新成功，准备处理 {len(directory_files[directory])} 个文件")
+                                # 先执行文件同步（不受通知开关影响）
+                                self._process_files_for_sync(directory_files[directory])
+                                # 然后根据配置决定是否发送通知
+                                if self._send_notification:
+                                    logger.info(f"准备发送 {len(directory_files[directory])} 个文件的通知")
+                                    self._send_notifications_for_files(directory_files[directory])
                         else:
                             logger.error(f"目录 {directory} 刷新失败: {result['message']}")
                     except Exception as e:
@@ -421,9 +460,66 @@ class CloudDriveWebhook(_PluginBase):
         
         return merged_directories
 
+    def _parse_path_mapping_config(self, file_path: str) -> tuple[str, list[str], bool]:
+        """
+        解析路径映射配置，支持同步目标
+        
+        Args:
+            file_path: 原始文件路径
+            
+        Returns:
+            tuple: (主目标路径, 同步目标路径列表, 是否成功映射)
+        """
+        if not self._path_mappings:
+            logger.info(f"未配置路径映射，使用原始路径: {file_path}")
+            return file_path, [], True
+        
+        # 解析路径映射配置
+        for line in self._path_mappings.strip().split('\n'):
+            line = line.strip()
+            if not line or '=>' not in line:
+                continue
+            
+            try:
+                source_path, targets = line.split('=>', 1)
+                source_path = source_path.strip()
+                targets = targets.strip()
+                
+                if file_path.startswith(source_path):
+                    # 分割目标路径，第一个是主目标，后面的是同步目标
+                    target_parts = [part.strip() for part in targets.split(':') if part.strip()]
+                    if not target_parts:
+                        continue
+                        
+                    # 主目标路径
+                    main_target = target_parts[0]
+                    mapped_main_path = file_path.replace(source_path, main_target, 1)
+                    
+                    # 同步目标路径列表
+                    sync_targets = []
+                    if len(target_parts) > 1:
+                        for sync_target in target_parts[1:]:
+                            # 确保目标路径以斜杠结尾
+                            if not sync_target.endswith('/'):
+                                sync_target += '/'
+                            sync_path = file_path.replace(source_path, sync_target, 1)
+                            sync_targets.append(sync_path)
+                    
+                    logger.info(f"路径映射成功: {file_path} => {mapped_main_path}")
+                    if sync_targets:
+                        logger.info(f"同步目标: {sync_targets}")
+                    
+                    return mapped_main_path, sync_targets, True
+                    
+            except Exception as e:
+                logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
+        
+        logger.warning(f"路径映射失败，跳过处理: {file_path}")
+        return file_path, [], False
+
     def _map_file_path(self, file_path: str, path_type: str = "mapping") -> tuple[str, bool]:
         """
-        映射文件路径
+        映射文件路径（兼容原有接口）
         
         Args:
             file_path: 原始文件路径
@@ -432,43 +528,8 @@ class CloudDriveWebhook(_PluginBase):
         Returns:
             tuple: (映射后的文件路径, 是否成功映射)
         """
-        if not self._path_mappings:
-            logger.info(f"未配置路径映射，使用原始路径: {file_path}")
-            return file_path, True
-        
-        mapped_path = file_path
-        
-        # 解析路径映射配置
-        mapping_applied = False
-        for line in self._path_mappings.strip().split('\n'):
-            line = line.strip()
-            if not line or '=>' not in line:
-                continue
-            
-            try:
-                source_path, target_path = line.split('=>', 1)
-                source_path = source_path.strip()
-                target_path = target_path.strip()
-                
-                if file_path.startswith(source_path):
-                    mapped_path = file_path.replace(source_path, target_path, 1)
-                    if path_type == "source":
-                        logger.info(f"[源模式] 路径映射成功: {file_path} => {mapped_path} (规则: {source_path} => {target_path})")
-                    else:
-                        logger.info(f"路径映射成功: {file_path} => {mapped_path} (规则: {source_path} => {target_path})")
-                    mapping_applied = True
-                    break
-            except Exception as e:
-                logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
-        
-        if not mapping_applied:
-            if path_type == "source":
-                logger.warning(f"[源模式] 路径映射失败，跳过处理: {file_path}")
-            else:
-                logger.warning(f"路径映射失败，跳过处理: {file_path}")
-            return file_path, False
-        else:
-            return mapped_path, True
+        main_path, _, success = self._parse_path_mapping_config(file_path)
+        return main_path, success
 
     def clouddrive_webhook(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
@@ -568,8 +629,8 @@ class CloudDriveWebhook(_PluginBase):
                     
                     logger.info(f"处理第 {i+1} 个文件: {source_file}")
                     
-                    # 映射文件路径
-                    mapped_file_path, mapping_success = self._map_file_path(source_file.strip(), "mapping")
+                    # 解析路径映射配置，获取主目标和同步目标
+                    mapped_file_path, sync_targets, mapping_success = self._parse_path_mapping_config(source_file.strip())
                     
                     # 如果路径映射失败，则跳过
                     if not mapping_success:
@@ -602,7 +663,8 @@ class CloudDriveWebhook(_PluginBase):
                         self._refresh_queue[parent_dir_str].append({
                             'timestamp': time.time(),
                             'original_path': source_file,
-                            'mapped_path': mapped_file_path
+                            'mapped_path': mapped_file_path,
+                            'sync_targets': sync_targets
                         })
                     
                     processed_files.append({
@@ -1042,6 +1104,71 @@ class CloudDriveWebhook(_PluginBase):
             logger.warning(f"检查服务器登录状态失败: {str(e)}")
             return False
 
+    def _process_files_for_sync(self, files_info: list):
+        """
+        处理文件列表的同步功能（独立于通知功能）
+        
+        Args:
+            files_info: 文件信息列表
+        """
+        try:
+            logger.info(f"准备处理 {len(files_info)} 个文件的同步")
+            
+            for file_info in files_info:
+                mapped_file_path = file_info.get('mapped_path', '')
+                original_file_path = file_info.get('original_path', '')
+                sync_targets = file_info.get('sync_targets', [])
+                
+                # 优先使用映射路径，如果不存在则使用原始路径
+                file_path_to_check = mapped_file_path if mapped_file_path else original_file_path
+                
+                if file_path_to_check and sync_targets:
+                    logger.info(f"开始处理文件同步: {file_path_to_check}")
+                    logger.info(f"同步目标: {sync_targets}")
+                    
+                    # 根据配置决定是否检查文件存在
+                    if self._check_file_exists:
+                        # 先刷新多个层级目录，然后检查文件是否存在，最多重试3次
+                        file_exists = False
+                        for retry_count in range(3):
+                            # 刷新多个层级目录
+                            refresh_success = self._refresh_multiple_directories(file_path_to_check)
+                            
+                            if refresh_success:
+                                logger.info(f"目录刷新成功，开始检查文件: {file_path_to_check}")
+                                file_exists = self._check_file_exists_via_grpc(file_path_to_check)
+                            else:
+                                logger.warning(f"目录刷新失败")
+                                file_exists = False
+                            
+                            if file_exists:
+                                logger.info(f"文件存在，开始执行同步: {file_path_to_check}")
+                                
+                                # 执行文件同步
+                                sync_result = self._sync_file_to_targets(file_path_to_check, sync_targets)
+                                logger.info(f"同步结果: {sync_result['message']}")
+                                break
+                            else:
+                                if retry_count < 2:  # 不是最后一次重试
+                                    logger.info(f"文件不存在，等待5秒后重试 ({retry_count + 1}/3): {file_path_to_check}")
+                                    time.sleep(5)  # 等待5秒后重试
+                                else:
+                                    logger.warning(f"文件不存在，跳过同步 (已重试3次): {file_path_to_check}")
+                    else:
+                        # 不检查文件存在，直接执行同步
+                        logger.info(f"跳过文件存在检查，直接执行同步: {file_path_to_check}")
+                        
+                        # 执行文件同步
+                        sync_result = self._sync_file_to_targets(file_path_to_check, sync_targets)
+                        logger.info(f"同步结果: {sync_result['message']}")
+                elif not sync_targets:
+                    logger.info(f"文件 {file_path_to_check} 没有配置同步目标，跳过同步")
+                else:
+                    logger.warning(f"文件信息中缺少路径信息: {file_info}")
+                    
+        except Exception as e:
+            logger.error(f"处理文件同步时发生错误: {str(e)}")
+
     def _send_notifications_for_files(self, files_info: list):
         """
         为文件列表发送入库通知
@@ -1055,6 +1182,7 @@ class CloudDriveWebhook(_PluginBase):
             for file_info in files_info:
                 mapped_file_path = file_info.get('mapped_path', '')
                 original_file_path = file_info.get('original_path', '')
+                sync_targets = file_info.get('sync_targets', [])
                 
                 # 优先使用映射路径，如果不存在则使用原始路径
                 # 注意：这里mapped_file_path已经确保是有效的，因为映射失败的文件不会进入队列
@@ -1077,7 +1205,14 @@ class CloudDriveWebhook(_PluginBase):
                                 file_exists = False
                             
                             if file_exists:
-                                logger.info(f"文件存在，发送通知: {file_path_to_check}")
+                                logger.info(f"文件存在，开始执行同步和通知: {file_path_to_check}")
+                                
+                                # 先执行文件同步
+                                if sync_targets:
+                                    sync_result = self._sync_file_to_targets(file_path_to_check, sync_targets)
+                                    logger.info(f"同步结果: {sync_result['message']}")
+                                
+                                # 发送通知
                                 self._send_refresh_notification(file_path_to_check)
                                 break
                             else:
@@ -1087,8 +1222,15 @@ class CloudDriveWebhook(_PluginBase):
                                 else:
                                     logger.warning(f"文件不存在，跳过通知 (已重试3次): {file_path_to_check}")
                     else:
-                        # 不检查文件存在，直接发送通知
-                        logger.info(f"跳过文件存在检查，直接发送通知: {file_path_to_check}")
+                        # 不检查文件存在，直接同步和发送通知
+                        logger.info(f"跳过文件存在检查，直接执行同步和通知: {file_path_to_check}")
+                        
+                        # 先执行文件同步
+                        if sync_targets:
+                            sync_result = self._sync_file_to_targets(file_path_to_check, sync_targets)
+                            logger.info(f"同步结果: {sync_result['message']}")
+                        
+                        # 发送通知
                         self._send_refresh_notification(file_path_to_check)
                 else:
                     logger.warning(f"文件信息中缺少路径信息: {file_info}")
@@ -1555,3 +1697,367 @@ class CloudDriveWebhook(_PluginBase):
             
         except Exception as e:
             logger.warning(f"发送入库通知失败：{str(e)}")
+
+    def _sync_file_to_targets(self, source_file_path: str, sync_targets: list[str]) -> dict:
+        """
+        同步文件到目标目录
+        
+        Args:
+            source_file_path: 源文件路径
+            sync_targets: 同步目标路径列表
+            
+        Returns:
+            dict: 同步结果
+        """
+        if not self._enable_sync or not sync_targets:
+            return {"success": True, "message": "同步功能未启用或无同步目标", "sync_results": []}
+        
+        logger.info(f"=== 开始文件同步 ===")
+        logger.info(f"源文件: {source_file_path}")
+        logger.info(f"同步目标: {sync_targets}")
+        
+        sync_results = []
+        
+        for target_path in sync_targets:
+            try:
+                logger.info(f"开始同步到: {target_path}")
+                
+                # 确保目标目录存在
+                target_dir = str(Path(target_path).parent)
+                self._ensure_directory_exists(target_dir)
+                
+                # 使用CloudDrive API复制文件
+                result = self._copy_file_via_grpc(source_file_path, target_path)
+                
+                sync_results.append({
+                    "target": target_path,
+                    "success": result["success"],
+                    "message": result["message"]
+                })
+                
+                if result["success"]:
+                    logger.info(f"✓ 同步成功: {source_file_path} => {target_path}")
+                else:
+                    logger.error(f"✗ 同步失败: {source_file_path} => {target_path} - {result['message']}")
+                    
+            except Exception as e:
+                error_msg = f"同步到 {target_path} 时发生错误: {str(e)}"
+                logger.error(error_msg)
+                sync_results.append({
+                    "target": target_path,
+                    "success": False,
+                    "message": error_msg
+                })
+        
+        success_count = sum(1 for r in sync_results if r["success"])
+        total_count = len(sync_results)
+        
+        logger.info(f"同步完成 - 成功: {success_count}/{total_count}")
+        
+        return {
+            "success": success_count > 0,
+            "message": f"同步完成 - 成功: {success_count}/{total_count}",
+            "sync_results": sync_results
+        }
+
+    def _copy_file_via_grpc(self, source_path: str, target_path: str) -> dict:
+        """
+        通过gRPC复制文件（使用官方支持的Backup API）
+        
+        Args:
+            source_path: 源文件路径
+            target_path: 目标文件路径
+            
+        Returns:
+            dict: 复制结果
+        """
+        try:
+            # 首先登录
+            login_success, login_message = self._login_to_clouddrive()
+            if not login_success:
+                return {"success": False, "message": f"登录失败: {login_message}"}
+            
+            stub = self._get_grpc_stub()
+            if not stub:
+                return {"success": False, "message": "无法创建gRPC连接"}
+            
+            # 获取目标目录
+            target_dir = str(Path(target_path).parent)
+            
+            logger.info(f"开始文件复制操作: {source_path} => {target_dir}")
+            logger.info("使用官方支持的Backup API进行文件复制")
+            
+            # 直接使用Backup API，跳过CopyFile API的尝试
+            return self._copy_file_via_backup_api(source_path, target_dir)
+                
+        except Exception as e:
+            error_msg = f"复制文件时发生错误：{str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    def _build_copy_file_request(self, source_path: str, target_dir: str) -> bytes:
+        """
+        构建CopyFile请求数据
+        
+        Args:
+            source_path: 源文件路径
+            target_dir: 目标目录路径
+            
+        Returns:
+            bytes: 请求数据
+        """
+        try:
+            # 尝试使用简化的方法，直接构建类似curl请求的格式
+            # 先尝试简单的方法
+            simple_result = self._build_simple_copy_request(source_path, target_dir)
+            if simple_result:
+                logger.info("使用简化的protobuf构建方法")
+                return simple_result
+            
+            # 如果简单方法失败，使用标准protobuf方法
+            logger.info("使用标准protobuf构建方法")
+            
+            # 构建protobuf消息
+            # 字段1: 源文件路径 (tag=1, wire_type=2=string)
+            source_bytes = source_path.encode('utf-8')
+            source_field = b'\x0A' + self._encode_varint(len(source_bytes)) + source_bytes
+            
+            # 字段2: 目标目录路径 (tag=2, wire_type=2=string) 
+            target_bytes = target_dir.encode('utf-8')
+            target_field = b'\x12' + self._encode_varint(len(target_bytes)) + target_bytes
+            
+            # 字段8: 标志位 (tag=8, wire_type=0=varint, value=1)
+            flag_field = b'(\x01'
+            
+            # 组合消息
+            message = source_field + target_field + flag_field
+            
+            # 添加gRPC前缀（4字节长度，大端序）
+            length_bytes = len(message).to_bytes(4, 'big')
+            
+            logger.info(f"构建的protobuf消息长度: {len(message)}")
+            logger.info(f"源路径: {source_path} (长度: {len(source_bytes)})")
+            logger.info(f"目标目录: {target_dir} (长度: {len(target_bytes)})")
+            logger.info(f"protobuf字段1: {source_field.hex()}")
+            logger.info(f"protobuf字段2: {target_field.hex()}")
+            logger.info(f"protobuf字段8: {flag_field.hex()}")
+            logger.info(f"完整消息: {(length_bytes + message).hex()}")
+            
+            return length_bytes + message
+            
+        except Exception as e:
+            logger.error(f"构建CopyFile请求失败: {str(e)}")
+            return b''
+
+    def _build_simple_copy_request(self, source_path: str, target_dir: str) -> bytes:
+        """
+        使用简化的方法构建CopyFile请求
+        
+        Args:
+            source_path: 源文件路径
+            target_dir: 目标目录路径
+            
+        Returns:
+            bytes: 请求数据
+        """
+        try:
+            # 直接使用类似curl请求的格式
+            # 字段1: 源文件路径
+            source_field = b'\x0A' + len(source_path).to_bytes(1, 'big') + source_path.encode('utf-8')
+            
+            # 字段2: 目标目录路径
+            target_field = b'\x12' + len(target_dir).to_bytes(1, 'big') + target_dir.encode('utf-8')
+            
+            # 字段8: 标志位
+            flag_field = b'(\x01'
+            
+            # 组合消息
+            message = source_field + target_field + flag_field
+            
+            # 添加gRPC前缀（4字节长度）
+            length_bytes = len(message).to_bytes(4, 'big')
+            
+            logger.info(f"简化方法 - 消息长度: {len(message)}")
+            logger.info(f"简化方法 - 完整消息: {(length_bytes + message).hex()}")
+            
+            return length_bytes + message
+            
+        except Exception as e:
+            logger.warning(f"简化protobuf构建失败: {str(e)}")
+            return b''
+
+    def _encode_varint(self, value: int) -> bytes:
+        """
+        编码varint值
+        
+        Args:
+            value: 要编码的整数值
+            
+        Returns:
+            bytes: 编码后的字节
+        """
+        if value < 0:
+            value = value + (1 << 64)
+        
+        result = bytearray()
+        while value >= 0x80:
+            result.append(0x80 | (value & 0x7F))
+            value >>= 7
+        result.append(value & 0x7F)
+        return bytes(result)
+
+    def _copy_file_via_backup_api(self, source_path: str, target_dir: str) -> dict:
+        """
+        使用Backup API作为CopyFile的替代方案
+        
+        Args:
+            source_path: 源文件路径
+            target_dir: 目标目录路径
+            
+        Returns:
+            dict: 复制结果
+        """
+        try:
+            # 导入protobuf消息
+            import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+            
+            stub = self._get_grpc_stub()
+            if not stub:
+                return {"success": False, "message": "无法创建gRPC连接"}
+            
+            logger.info(f"使用Backup API复制文件: {source_path} => {target_dir}")
+            
+            # 创建备份配置
+            backup_config = CloudDrive_pb2.Backup(
+                sourcePath=str(Path(source_path).parent),  # 源目录
+                destinations=[
+                    CloudDrive_pb2.BackupDestination(
+                        destinationPath=target_dir,
+                        isEnabled=True
+                    )
+                ],
+                fileBackupRules=[
+                    CloudDrive_pb2.FileBackupRule(
+                        fileNames=Path(source_path).name,  # 只同步这个文件
+                        isEnabled=True,
+                        isBlackList=False,
+                        applyToFolder=False
+                    )
+                ],
+                fileReplaceRule=CloudDrive_pb2.FileReplaceRule.Overwrite,
+                fileDeleteRule=CloudDrive_pb2.FileDeleteRule.Keep,
+                isEnabled=True,
+                fileSystemWatchEnabled=False,
+                walkingThroughIntervalSecs=0,
+                forceWalkingThroughOnStart=True
+            )
+            
+            # 创建带token的metadata
+            metadata = [('authorization', f'Bearer {self._token}')]
+            
+            # 添加备份任务
+            response = stub.BackupAdd(backup_config, metadata=metadata)
+            logger.info("备份任务创建成功，开始执行同步")
+            
+            # 等待一段时间让备份执行
+            time.sleep(2)
+            
+            # 删除临时备份任务
+            try:
+                remove_request = CloudDrive_pb2.StringValue(
+                    value=str(Path(source_path).parent)
+                )
+                stub.BackupRemove(remove_request, metadata=metadata)
+                logger.info("临时备份任务已清理")
+            except Exception as e:
+                logger.warning(f"清理临时备份任务时发生错误: {str(e)}")
+            
+            return {"success": True, "message": "文件复制完成（通过Backup API）"}
+            
+        except Exception as e:
+            logger.error(f"Backup API复制失败: {str(e)}")
+            return {"success": False, "message": f"Backup API复制失败: {str(e)}"}
+
+    def _ensure_directory_exists(self, directory_path: str) -> bool:
+        """
+        确保目录存在，如果不存在则创建
+        
+        Args:
+            directory_path: 目录路径
+            
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            # 首先登录
+            login_success, login_message = self._login_to_clouddrive()
+            if not login_success:
+                logger.error(f"登录失败: {login_message}")
+                return False
+            
+            stub = self._get_grpc_stub()
+            if not stub:
+                logger.error("无法创建gRPC连接")
+                return False
+            
+            # 导入protobuf消息
+            try:
+                import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+            except ImportError as e:
+                logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
+                return False
+            
+            # 逐级检查和创建目录
+            path_parts = Path(directory_path).parts
+            current_path = ""
+            
+            # 创建带token的metadata
+            metadata = [('authorization', f'Bearer {self._token}')]
+            
+            for i, part in enumerate(path_parts):
+                if part == "/":
+                    current_path = "/"
+                    continue
+                elif current_path == "/":
+                    current_path = f"/{part}"
+                else:
+                    current_path = f"{current_path}/{part}"
+                
+                # 检查目录是否存在
+                try:
+                    find_request = CloudDrive_pb2.FindFileByPathRequest(
+                        parentPath=str(Path(current_path).parent) if i > 0 else "/",
+                        path=part
+                    )
+                    response = stub.FindFileByPath(find_request, metadata=metadata)
+                    if response and response.fullPathName:
+                        logger.debug(f"目录已存在: {current_path}")
+                        continue
+                except grpc.RpcError:
+                    # 目录不存在，需要创建
+                    pass
+                
+                # 创建目录
+                parent_path = str(Path(current_path).parent) if i > 0 else "/"
+                create_request = CloudDrive_pb2.CreateFolderRequest(
+                    parentPath=parent_path,
+                    folderName=part
+                )
+                
+                try:
+                    create_response = stub.CreateFolder(create_request, metadata=metadata)
+                    if create_response.result.success:
+                        logger.info(f"✓ 目录创建成功: {current_path}")
+                    else:
+                        logger.warning(f"✗ 目录创建失败: {current_path} - {create_response.result.errorMessage}")
+                        return False
+                except grpc.RpcError as e:
+                    logger.error(f"创建目录失败: {current_path} - {e.details()}")
+                    return False
+            
+            logger.info(f"目录路径确保完成: {directory_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"确保目录存在时发生错误: {str(e)}")
+            return False
