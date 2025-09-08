@@ -62,9 +62,12 @@ class DownloaderBalancer(_PluginBase):
         if self._enabled and self._enable_failover:
             self._start_health_check()
         
-        # 注册事件监听器
+        # 动态注册作为兜底（优先使用装饰器方式，见 on_resource_download）
         if self._enabled and self._override_downloader:
-            eventmanager.register(ChainEventType.ResourceDownload, self._handle_resource_download)
+            try:
+                eventmanager.register(ChainEventType.ResourceDownload, self._handle_resource_download)
+            except Exception as _:
+                pass
         
         logger.info(f"下载器负载均衡插件初始化完成，启用状态: {self._enabled}, 策略: {self._strategy}, 覆盖下载器: {self._override_downloader}")
 
@@ -741,6 +744,13 @@ class DownloaderBalancer(_PluginBase):
                 
                 # 更新事件数据中的下载器
                 event_data.downloader = selected_downloader
+                # 关键：直接覆盖 context 内的 site_downloader，供 download_single 使用
+                try:
+                    if hasattr(event_data, "context") and event_data.context and 
+                       hasattr(event_data.context, "torrent_info") and event_data.context.torrent_info:
+                        setattr(event_data.context.torrent_info, "site_downloader", selected_downloader)
+                except Exception as _:
+                    pass
                 
                 # 更新统计信息
                 with self._lock:
