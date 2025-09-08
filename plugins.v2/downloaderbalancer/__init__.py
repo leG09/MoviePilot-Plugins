@@ -331,12 +331,18 @@ class DownloaderBalancer(_PluginBase):
                 DownloadChain.download_single = self._orig_download_single
         except Exception:
             pass
+        try:
+            if hasattr(self, "_orig_download") and self._orig_download:
+                DownloadChain.download = self._orig_download
+        except Exception:
+            pass
 
     def _monkey_patch_download_chain(self) -> None:
         """对 DownloadChain.download_single 打补丁，强制使用插件选择的下载器"""
         if hasattr(self, "_orig_download_single") and self._orig_download_single:
             return
         self._orig_download_single = DownloadChain.download_single
+        self._orig_download = DownloadChain.download
 
         plugin = self
 
@@ -346,6 +352,11 @@ class DownloaderBalancer(_PluginBase):
                 context = kwargs.get("context")
                 if not context and len(args) >= 1:
                     context = args[0]
+                # 记录在实例上，供最终 download 包装器兜底使用
+                try:
+                    setattr(dc_self, "_last_context", context)
+                except Exception:
+                    pass
                 selected = None
                 if context and getattr(context, "torrent_info", None) and getattr(context, "media_info", None):
                     ctx = {
@@ -373,6 +384,37 @@ class DownloaderBalancer(_PluginBase):
             return plugin._orig_download_single(dc_self, *args, **kwargs)
 
         DownloadChain.download_single = _wrapper
+
+        def _download_wrapper(dc_self, *args, **kwargs):
+            # 强制在最终下载入口也校正 downloader
+            try:
+                # 参数位置: content,cookie,episodes,download_dir,category,label,downloader
+                # 优先使用显式传入的 downloader；若空，则再次根据最近的 context 猜测
+                current_downloader = kwargs.get("downloader")
+                if not current_downloader:
+                    # 尝试从调用方属性拿到最近 context（下载链上常见字段）
+                    context = getattr(dc_self, "_last_context", None)
+                    selected = None
+                    if context and getattr(context, "torrent_info", None) and getattr(context, "media_info", None):
+                        ctx = {
+                            "filename": context.torrent_info.title,
+                            "title": context.media_info.title,
+                            "torrent_hash": getattr(context.torrent_info, 'hash', ''),
+                            "url": context.torrent_info.enclosure,
+                            "media_type": context.media_info.type.value if context.media_info and context.media_info.type else None,
+                            "category": getattr(context.media_info, 'category', None),
+                        }
+                        selected = plugin._select_downloader_by_strategy(ctx)
+                        if not selected and plugin._selected_downloaders:
+                            selected = plugin._selected_downloaders[0]
+                    if selected:
+                        kwargs["downloader"] = selected
+                        logger.info(f"下载器负载均衡（最终）选择: {selected}")
+            except Exception as e:
+                logger.info(f"下载器最终选择补丁失败: {e}")
+            return plugin._orig_download(dc_self, *args, **kwargs)
+
+        DownloadChain.download = _download_wrapper
 
     def _get_available_downloaders(self) -> List[Dict[str, Any]]:
         """获取可用的下载器列表"""
