@@ -64,5 +64,17 @@
       "v2.1": "功能增强版本：添加路径映射、请求合并、登录缓存、智能通知、自动依赖管理",
       "v2.0": "纯Python gRPC版本：移除CLI依赖，直接使用gRPC通信"
     }
+  },
+  "DownloaderBalancer": {
+    "name": "下载器负载均衡",
+    "description": "下载器负载均衡插件，支持轮询、Hash、电影规则分类等多种选择策略",
+    "labels": "下载管理",
+    "version": "1.0.0",
+    "icon": "Qbittorrent_A.png",
+    "author": "leGO9",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本，实现下载器负载均衡功能"
+    }
   }
 }
