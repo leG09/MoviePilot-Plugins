@@ -12,7 +12,7 @@ from app.core.security import verify_apikey
 from app.core.event import eventmanager, Event
 from app.helper.service import ServiceConfigHelper
 from app.schemas import DownloaderConf, ResourceDownloadEventData
-from app.schemas.types import MediaType, ChainEventType
+from app.schemas.types import MediaType, ChainEventType, EventType
 from app.log import logger
 
 try:
@@ -62,10 +62,13 @@ class DownloaderBalancer(_PluginBase):
         if self._enabled and self._enable_failover:
             self._start_health_check()
         
-        # 动态注册作为兜底（优先使用装饰器方式，见 on_resource_download）
+        # 动态注册作为兜底
         if self._enabled and self._override_downloader:
             try:
+                # 同步事件
                 eventmanager.register(ChainEventType.ResourceDownload, self._handle_resource_download)
+                # 兼容订阅完成/添加钩子（用于验证日志或后续扩展）
+                eventmanager.register(EventType.ResourceDownload, self._handle_resource_download)
             except Exception as _:
                 pass
         
@@ -717,6 +720,7 @@ class DownloaderBalancer(_PluginBase):
             event: 资源下载事件
         """
         try:
+            logger.debug("DownloaderBalancer: 收到 ResourceDownload 事件")
             if not self._enabled or not self._override_downloader:
                 return
             
@@ -735,8 +739,11 @@ class DownloaderBalancer(_PluginBase):
                 "category": event_data.context.media_info.category
             }
             
-            # 选择下载器
+            # 选择下载器（若调用方已显式指定 downloader，则仍然覆盖以确保策略生效）
             selected_downloader = self._select_downloader_by_strategy(context)
+            if not selected_downloader and self._selected_downloaders:
+                # 兜底：未选出则使用第一个配置的下载器
+                selected_downloader = self._selected_downloaders[0]
             
             if selected_downloader:
                 # 记录原始下载器
@@ -764,6 +771,14 @@ class DownloaderBalancer(_PluginBase):
             
         except Exception as e:
             logger.error(f"处理资源下载事件时发生错误: {e}")
+
+    # 使用装饰器确保事件注册一定生效
+    @eventmanager.register(ChainEventType.ResourceDownload)
+    def on_resource_download(self, event: Event):
+        try:
+            return self._handle_resource_download(event)
+        except Exception as e:
+            logger.error(f"on_resource_download 处理失败: {e}")
 
     def _select_downloader_by_strategy(self, context: Dict[str, Any] = None) -> Optional[str]:
         """
