@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.security import verify_apikey
 from app.core.event import eventmanager, Event
 from app.helper.service import ServiceConfigHelper
+from app.chain.download import DownloadChain
 from app.schemas import DownloaderConf, ResourceDownloadEventData
 from app.schemas.types import MediaType, ChainEventType, EventType
 from app.log import logger
@@ -71,6 +72,13 @@ class DownloaderBalancer(_PluginBase):
                 eventmanager.register(EventType.ResourceDownload, self._handle_resource_download)
             except Exception as _:
                 pass
+
+        # 对 DownloadChain 进行猴子补丁，强制覆盖 downloader 参数
+        if self._enabled and self._override_downloader:
+            try:
+                self._monkey_patch_download_chain()
+            except Exception as e:
+                logger.warning(f"DownloadChain 补丁失败: {e}")
         
         logger.info(f"下载器负载均衡插件初始化完成，启用状态: {self._enabled}, 策略: {self._strategy}, 覆盖下载器: {self._override_downloader}")
 
@@ -317,6 +325,53 @@ class DownloaderBalancer(_PluginBase):
         self._stop_health_check = True
         if self._health_check_thread and self._health_check_thread.is_alive():
             self._health_check_thread.join(timeout=5)
+        # 还原猴子补丁
+        try:
+            if hasattr(self, "_orig_download_single") and self._orig_download_single:
+                DownloadChain.download_single = self._orig_download_single
+        except Exception:
+            pass
+
+    def _monkey_patch_download_chain(self) -> None:
+        """对 DownloadChain.download_single 打补丁，强制使用插件选择的下载器"""
+        if hasattr(self, "_orig_download_single") and self._orig_download_single:
+            return
+        self._orig_download_single = DownloadChain.download_single
+
+        plugin = self
+
+        def _wrapper(dc_self, *args, **kwargs):
+            try:
+                context = kwargs.get("context")
+                if not context and len(args) >= 1:
+                    context = args[0]
+                selected = None
+                if context and getattr(context, "torrent_info", None) and getattr(context, "media_info", None):
+                    ctx = {
+                        "filename": context.torrent_info.title,
+                        "title": context.media_info.title,
+                        "torrent_hash": getattr(context.torrent_info, 'hash', ''),
+                        "url": context.torrent_info.enclosure,
+                        "media_type": context.media_info.type.value if context.media_info and context.media_info.type else None,
+                        "category": getattr(context.media_info, 'category', None),
+                    }
+                    selected = plugin._select_downloader_by_strategy(ctx)
+                    if not selected and plugin._selected_downloaders:
+                        selected = plugin._selected_downloaders[0]
+                # 覆盖 downloader 与 site_downloader
+                if selected:
+                    try:
+                        if context and getattr(context, "torrent_info", None):
+                            setattr(context.torrent_info, "site_downloader", selected)
+                    except Exception:
+                        pass
+                    kwargs["downloader"] = selected
+                    logger.info(f"下载器负载均衡（补丁）选择: {selected} 用于下载: {context.torrent_info.title if context else ''}")
+            except Exception as e:
+                logger.debug(f"下载器选择补丁失败: {e}")
+            return plugin._orig_download_single(dc_self, *args, **kwargs)
+
+        DownloadChain.download_single = _wrapper
 
     def _get_available_downloaders(self) -> List[Dict[str, Any]]:
         """获取可用的下载器列表"""
@@ -758,6 +813,10 @@ class DownloaderBalancer(_PluginBase):
                         hasattr(event_data.context, "torrent_info") and event_data.context.torrent_info
                     ):
                         setattr(event_data.context.torrent_info, "site_downloader", selected_downloader)
+                        # 同步覆盖 DownloadChain.call 参数场景：设置 options 里的 downloder/save_path
+                        if not event_data.options:
+                            event_data.options = {}
+                        event_data.options["downloader"] = selected_downloader
                 except Exception as _:
                     pass
                 
