@@ -64,7 +64,7 @@ class DownloaderBalancer(_PluginBase):
         
         # 注册事件监听器
         if self._enabled and self._override_downloader:
-            eventmanager.register(ChainEventType.ResourceDownload)(self._handle_resource_download)
+            eventmanager.register(ChainEventType.ResourceDownload, self._handle_resource_download)
         
         logger.info(f"下载器负载均衡插件初始化完成，启用状态: {self._enabled}, 策略: {self._strategy}, 覆盖下载器: {self._override_downloader}")
 
@@ -100,6 +100,13 @@ class DownloaderBalancer(_PluginBase):
                 "methods": ["POST"],
                 "summary": "重置统计信息",
                 "description": "重置所有下载器的统计信息"
+            },
+            {
+                "path": "/test_event",
+                "endpoint": self.test_event,
+                "methods": ["POST"],
+                "summary": "测试事件监听",
+                "description": "测试插件是否正确监听了下载事件"
             }
         ]
 
@@ -297,7 +304,7 @@ class DownloaderBalancer(_PluginBase):
 
     def get_page(self) -> list:
         """获取插件页面"""
-        pass
+        return []
 
     def stop_service(self):
         """停止插件"""
@@ -565,6 +572,78 @@ class DownloaderBalancer(_PluginBase):
             logger.error(f"重置统计信息时发生错误: {e}")
             return {"success": False, "message": f"重置统计信息失败: {str(e)}"}
 
+    def test_event(self, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
+        """
+        测试事件监听
+        
+        Args:
+            apikey: API密钥
+            
+        Returns:
+            Dict: 测试结果
+        """
+        try:
+            # 模拟一个下载事件来测试插件是否正常工作
+            from app.core.context import MediaInfo, TorrentInfo, Context
+            from app.core.metainfo import MetaInfo
+            from app.schemas import ResourceDownloadEventData
+            
+            # 创建测试数据
+            meta = MetaInfo(title="测试电影.2023.1080p.BluRay.x264")
+            media = MediaInfo()
+            media.title = "测试电影"
+            media.year = 2023
+            media.type = MediaType.MOVIE
+            
+            torrent = TorrentInfo()
+            torrent.title = "测试电影.2023.1080p.BluRay.x264"
+            torrent.enclosure = "magnet:?xt=urn:btih:test"
+            
+            context = Context(
+                meta_info=meta,
+                media_info=media,
+                torrent_info=torrent
+            )
+            
+            # 创建事件数据
+            event_data = ResourceDownloadEventData(
+                context=context,
+                episodes=[],
+                channel=None,
+                origin="test",
+                downloader="test_downloader",
+                options={}
+            )
+            
+            # 模拟事件处理
+            context_for_selection = {
+                "filename": torrent.title,
+                "title": media.title,
+                "torrent_hash": "test_hash",
+                "url": torrent.enclosure,
+                "media_type": media.type.value,
+                "category": media.category
+            }
+            
+            selected_downloader = self._select_downloader_by_strategy(context_for_selection)
+            
+            return {
+                "success": True,
+                "message": "事件监听测试完成",
+                "test_data": {
+                    "original_downloader": "test_downloader",
+                    "selected_downloader": selected_downloader,
+                    "strategy": self._strategy,
+                    "available_downloaders": self._selected_downloaders,
+                    "plugin_enabled": self._enabled,
+                    "override_enabled": self._override_downloader
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"测试事件监听时发生错误: {e}")
+            return {"success": False, "message": f"测试失败: {str(e)}"}
+
     def _start_health_check(self):
         """启动健康检查线程"""
         if self._health_check_thread and self._health_check_thread.is_alive():
@@ -657,6 +736,9 @@ class DownloaderBalancer(_PluginBase):
             selected_downloader = self._select_downloader_by_strategy(context)
             
             if selected_downloader:
+                # 记录原始下载器
+                original_downloader = event_data.downloader
+                
                 # 更新事件数据中的下载器
                 event_data.downloader = selected_downloader
                 
@@ -665,7 +747,8 @@ class DownloaderBalancer(_PluginBase):
                     self._downloader_stats[selected_downloader]['last_used'] = time.time()
                 
                 logger.info(f"下载器负载均衡选择: {selected_downloader} (策略: {self._strategy}) "
-                           f"用于下载: {event_data.context.torrent_info.title}")
+                           f"用于下载: {event_data.context.torrent_info.title} "
+                           f"(原下载器: {original_downloader or '未指定'})")
             
         except Exception as e:
             logger.error(f"处理资源下载事件时发生错误: {e}")
