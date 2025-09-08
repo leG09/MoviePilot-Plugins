@@ -297,7 +297,7 @@ class DownloaderBalancer(_PluginBase):
 
     def get_page(self) -> list:
         """获取插件页面"""
-        return []
+        pass
 
     def stop_service(self):
         """停止插件"""
