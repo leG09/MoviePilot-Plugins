@@ -746,8 +746,10 @@ class DownloaderBalancer(_PluginBase):
                 event_data.downloader = selected_downloader
                 # 关键：直接覆盖 context 内的 site_downloader，供 download_single 使用
                 try:
-                    if hasattr(event_data, "context") and event_data.context and 
-                       hasattr(event_data.context, "torrent_info") and event_data.context.torrent_info:
+                    if (
+                        hasattr(event_data, "context") and event_data.context and
+                        hasattr(event_data.context, "torrent_info") and event_data.context.torrent_info
+                    ):
                         setattr(event_data.context.torrent_info, "site_downloader", selected_downloader)
                 except Exception as _:
                     pass
