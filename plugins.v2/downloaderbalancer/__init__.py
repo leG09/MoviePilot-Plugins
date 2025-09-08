@@ -341,6 +341,7 @@ class DownloaderBalancer(_PluginBase):
         plugin = self
 
         def _wrapper(dc_self, *args, **kwargs):
+            logger.info("DownloaderBalancer: 进入 download_single 补丁包装器")
             try:
                 context = kwargs.get("context")
                 if not context and len(args) >= 1:
@@ -368,7 +369,7 @@ class DownloaderBalancer(_PluginBase):
                     kwargs["downloader"] = selected
                     logger.info(f"下载器负载均衡（补丁）选择: {selected} 用于下载: {context.torrent_info.title if context else ''}")
             except Exception as e:
-                logger.debug(f"下载器选择补丁失败: {e}")
+                logger.info(f"下载器选择补丁失败: {e}")
             return plugin._orig_download_single(dc_self, *args, **kwargs)
 
         DownloadChain.download_single = _wrapper
@@ -775,7 +776,7 @@ class DownloaderBalancer(_PluginBase):
             event: 资源下载事件
         """
         try:
-            logger.debug("DownloaderBalancer: 收到 ResourceDownload 事件")
+            logger.info("DownloaderBalancer: 收到 ResourceDownload 事件")
             if not self._enabled or not self._override_downloader:
                 return
             
