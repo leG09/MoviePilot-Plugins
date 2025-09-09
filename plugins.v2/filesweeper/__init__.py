@@ -9,6 +9,8 @@ try:
 except ImportError:
     from typing import Annotated
 
+from apscheduler.triggers.cron import CronTrigger
+
 from app.plugins import _PluginBase
 from app.core.config import settings
 from app.core.security import verify_apikey
@@ -340,6 +342,20 @@ class FileSweeper(_PluginBase):
         """获取插件页面"""
         pass
 
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        注册插件公共服务
+        """
+        if self._enabled and self._cron:
+            return [{
+                "id": "FileSweeper",
+                "name": "文件清理服务",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self._execute_clean,
+                "kwargs": {}
+            }]
+        return []
+
     def stop_service(self):
         """停止插件"""
         logger.info("FileSweeper插件已停止")
@@ -415,7 +431,10 @@ class FileSweeper(_PluginBase):
             Dict: 清理结果
         """
         try:
+            logger.info("=== 开始执行文件清理任务 ===")
+            
             if not self._clean_directories:
+                logger.warning("未配置清理目录")
                 return {
                     "success": False,
                     "message": "未配置清理目录",
@@ -484,7 +503,13 @@ class FileSweeper(_PluginBase):
                 "dry_run": self._dry_run
             }
             
-            logger.info(f"清理任务完成: {result['message']}")
+            logger.info(f"=== 清理任务完成 ===")
+            logger.info(f"结果: {result['message']}")
+            if errors:
+                logger.warning(f"错误数量: {len(errors)}")
+                for error in errors:
+                    logger.warning(f"错误: {error}")
+            
             return result
             
         except Exception as e:
@@ -730,6 +755,8 @@ class FileSweeper(_PluginBase):
         if not self._enabled:
             return
         
-        # 这里可以添加定时任务逻辑
-        # 由于MoviePilot的定时任务机制可能不同，这里只是示例
         logger.info("FileSweeper服务正在运行")
+        if self._cron:
+            logger.info(f"定时任务已注册: {self._cron}")
+        else:
+            logger.warning("未配置定时任务表达式")
