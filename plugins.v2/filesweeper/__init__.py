@@ -13,7 +13,7 @@ from app.plugins import _PluginBase
 from app.core.config import settings
 from app.core.security import verify_apikey
 from app.schemas import Notification, NotificationType, ContentType
-from app.schemas.event import EventType
+from app.schemas.types import EventType
 from app.log import logger
 
 
