@@ -17,18 +17,18 @@ from app.schemas.event import EventType
 from app.log import logger
 
 
-class AutoClean(_PluginBase):
-    """自动清理插件 - 定时删除指定目录超过N小时的文件夹和文件"""
+class FileSweeper(_PluginBase):
+    """文件清理器插件 - 定时删除指定目录超过N小时的文件夹和文件"""
     
     # 插件信息
-    plugin_name = "AutoClean"
+    plugin_name = "FileSweeper"
     plugin_desc = "定时删除指定目录超过N小时的文件夹和文件，支持多种过滤条件"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
     plugin_version = "1.0"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
-    plugin_config_prefix = "autoclean"
+    plugin_config_prefix = "filesweeper"
     
     def init_plugin(self, config: dict = None):
         """初始化插件"""
@@ -45,7 +45,7 @@ class AutoClean(_PluginBase):
         self._min_size_mb = config.get("min_size_mb", 0) if config else 0
         self._max_size_mb = config.get("max_size_mb", 0) if config else 0
         
-        logger.info(f"AutoClean插件初始化完成，启用状态: {self._enabled}")
+        logger.info(f"FileSweeper插件初始化完成，启用状态: {self._enabled}")
         if self._enabled:
             logger.info(f"清理目录: {self._clean_directories}")
             logger.info(f"最大年龄: {self._max_age_hours}小时")
@@ -60,9 +60,9 @@ class AutoClean(_PluginBase):
         """获取插件命令"""
         return [
             {
-                "cmd": "/autoclean",
+                "cmd": "/filesweeper",
                 "event": EventType.PluginAction,
-                "desc": "手动执行自动清理",
+                "desc": "手动执行文件清理",
                 "category": "清理",
                 "data": {
                     "action": "manual_clean"
@@ -342,7 +342,7 @@ class AutoClean(_PluginBase):
 
     def stop_service(self):
         """停止插件"""
-        logger.info("AutoClean插件已停止")
+        logger.info("FileSweeper插件已停止")
 
     def manual_clean(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
@@ -711,9 +711,9 @@ class AutoClean(_PluginBase):
             
             # 发送通知
             notification = Notification(
-                channel="AutoClean",
+                channel="FileSweeper",
                 mtype=NotificationType.Manual,
-                title="自动清理任务完成",
+                title="文件清理任务完成",
                 text=message,
                 image=""
             )
@@ -732,4 +732,4 @@ class AutoClean(_PluginBase):
         
         # 这里可以添加定时任务逻辑
         # 由于MoviePilot的定时任务机制可能不同，这里只是示例
-        logger.info("AutoClean服务正在运行")
+        logger.info("FileSweeper服务正在运行")
