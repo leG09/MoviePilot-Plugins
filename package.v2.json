@@ -76,5 +76,17 @@
     "history": {
       "v1.0.0": "首个版本，实现下载器负载均衡功能"
     }
+  },
+  "AutoClean": {
+    "name": "自动清理",
+    "description": "自动清理插件，支持定时删除指定目录超过N小时的文件夹和文件",
+    "labels": "清理",
+    "version": "1.0",
+    "icon": "refresh2.png",
+    "author": "leGO9",
+    "level": 1,
+    "history": {
+      "v1.0": "首个版本，实现自动清理功能"
+    }
   }
 }
