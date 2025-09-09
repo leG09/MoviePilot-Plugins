@@ -554,18 +554,27 @@ class FileSweeper(_PluginBase):
                         try:
                             # 检查文件是否应该被删除
                             if self._should_delete_file(file_path, cutoff_time, extensions, exclude_patterns):
+                                # 读取元数据前再次确认文件存在，避免竞态
+                                if not os.path.exists(file_path):
+                                    continue
                                 file_size = os.path.getsize(file_path)
+                                file_mtime_iso = datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
                                 
                                 if not self._dry_run:
-                                    os.remove(file_path)
-                                    logger.info(f"删除文件: {file_path}")
+                                    try:
+                                        os.remove(file_path)
+                                        logger.info(f"删除文件: {file_path}")
+                                    except FileNotFoundError:
+                                        # 被其他进程删除，忽略
+                                        logger.debug(f"文件已不存在，跳过: {file_path}")
+                                        continue
                                 else:
                                     logger.info(f"[预览] 将删除文件: {file_path}")
                                 
                                 cleaned_files.append({
                                     "path": file_path,
                                     "size": file_size,
-                                    "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
+                                    "modified": file_mtime_iso
                                 })
                                 total_size += file_size
                                 
