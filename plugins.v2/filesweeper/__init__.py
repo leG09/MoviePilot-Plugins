@@ -37,15 +37,16 @@ class FileSweeper(_PluginBase):
         self._enabled = config.get("enabled", False) if config else False
         self._cron = config.get("cron", "0 2 * * *") if config else "0 2 * * *"  # 默认每天凌晨2点执行
         self._clean_directories = config.get("clean_directories", "") if config else ""
-        self._max_age_hours = config.get("max_age_hours", 24) if config else 24
+        # 兼容字符串/数字输入
+        self._max_age_hours = self._to_float(config.get("max_age_hours", 24) if config else 24, 24.0)
         self._delete_empty_dirs = config.get("delete_empty_dirs", True) if config else True
         self._delete_files = config.get("delete_files", True) if config else True
         self._file_extensions = config.get("file_extensions", "") if config else ""
         self._exclude_patterns = config.get("exclude_patterns", "") if config else ""
         self._dry_run = config.get("dry_run", False) if config else False
         self._send_notification = config.get("send_notification", True) if config else True
-        self._min_size_mb = config.get("min_size_mb", 0) if config else 0
-        self._max_size_mb = config.get("max_size_mb", 0) if config else 0
+        self._min_size_mb = self._to_float(config.get("min_size_mb", 0) if config else 0, 0.0)
+        self._max_size_mb = self._to_float(config.get("max_size_mb", 0) if config else 0, 0.0)
         
         logger.info(f"FileSweeper插件初始化完成，启用状态: {self._enabled}")
         if self._enabled:
@@ -452,8 +453,8 @@ class FileSweeper(_PluginBase):
             # 解析排除模式
             exclude_patterns = [pattern.strip() for pattern in self._exclude_patterns.split(',') if pattern.strip()] if self._exclude_patterns else []
             
-            # 计算时间阈值
-            cutoff_time = datetime.now() - timedelta(hours=self._max_age_hours)
+            # 计算时间阈值（确保为float）
+            cutoff_time = datetime.now() - timedelta(hours=float(self._max_age_hours))
             
             cleaned_files = []
             cleaned_dirs = []
@@ -647,9 +648,11 @@ class FileSweeper(_PluginBase):
             
             # 检查文件大小
             file_size = os.path.getsize(file_path)
-            if self._min_size_mb > 0 and file_size < self._min_size_mb * 1024 * 1024:
+            min_bytes = float(self._min_size_mb) * 1024 * 1024 if self._min_size_mb else 0
+            max_bytes = float(self._max_size_mb) * 1024 * 1024 if self._max_size_mb else 0
+            if min_bytes > 0 and file_size < min_bytes:
                 return False
-            if self._max_size_mb > 0 and file_size > self._max_size_mb * 1024 * 1024:
+            if max_bytes > 0 and file_size > max_bytes:
                 return False
             
             return True
@@ -704,11 +707,12 @@ class FileSweeper(_PluginBase):
         
         size_names = ["B", "KB", "MB", "GB", "TB"]
         i = 0
-        while size_bytes >= 1024 and i < len(size_names) - 1:
-            size_bytes /= 1024.0
+        value = float(size_bytes)
+        while value >= 1024 and i < len(size_names) - 1:
+            value /= 1024.0
             i += 1
         
-        return f"{size_bytes:.2f} {size_names[i]}"
+        return f"{value:.2f} {size_names[i]}"
 
     def _send_clean_notification(self, cleaned_files: List[Dict], cleaned_dirs: List[Dict], 
                                 total_size: int, errors: List[str]):
@@ -749,6 +753,23 @@ class FileSweeper(_PluginBase):
             
         except Exception as e:
             logger.error(f"发送清理通知时发生错误: {str(e)}")
+
+    @staticmethod
+    def _to_float(value: Any, default: float) -> float:
+        """
+        安全地将值转换为float，失败则返回默认值
+        """
+        try:
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                return float(value)
+            s = str(value).strip()
+            if s == "":
+                return default
+            return float(s)
+        except Exception:
+            return default
 
     def run_service(self):
         """运行服务"""
