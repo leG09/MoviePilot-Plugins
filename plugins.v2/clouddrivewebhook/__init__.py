@@ -18,20 +18,23 @@ from app.schemas.transfer import TransferInfo
 from app.schemas.file import FileItem
 from app.chain.transfer import TransferChain
 from app.chain.media import MediaChain
+from app.chain.mediaserver import MediaServerChain
 from app.core.metainfo import MetaInfoPath
-from app.schemas.types import MediaType
+from app.schemas.types import MediaType, EventType
+from app.schemas.mediaserver import RefreshMediaItem
+from app.core.event import eventmanager
 from app.log import logger
 
 
 class CloudDriveWebhook(_PluginBase):
-    """CloudDrive目录刷新Webhook插件 - 纯Python gRPC版本"""
+    """CloudDrive目录刷新Webhook插件 - 纯Python gRPC版本，集成媒体库刷新功能"""
     
     # 插件信息
     plugin_name = "CloudDriveWebhook"
-    plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步"
+    plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步和媒体库刷新"
     plugin_icon = "clouddrive.png"
     plugin_color = "#00BFFF"
-    plugin_version = "2.2"
+    plugin_version = "2.3"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "clouddrivewebhook"
@@ -48,6 +51,7 @@ class CloudDriveWebhook(_PluginBase):
         self._use_ssl = config.get("use_ssl", False) if config else False
         self._path_mappings = config.get("path_mappings", "") if config else ""
         self._enable_sync = config.get("enable_sync", False) if config else False
+        self._refresh_media_library = config.get("refresh_media_library", False) if config else False
         
         # gRPC相关
         self._channel = None
@@ -159,6 +163,20 @@ class CloudDriveWebhook(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "refresh_media_library",
+                                            "label": "刷新媒体库",
+                                            "color": "primary"
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -192,6 +210,24 @@ class CloudDriveWebhook(_PluginBase):
                                         "props": {
                                             "type": "success",
                                             "text": "文件同步功能：使用CloudDrive原生CopyFile API实现真正的文件复制，支持跨网盘文件同步。如果CopyFile API不可用，将自动回退到Backup API。"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "text": "媒体库刷新功能：启用后会在文件处理完成后自动刷新Emby/Jellyfin媒体库，触发刮削和媒体信息更新。"
                                         }
                                     }
                                 ]
@@ -320,7 +356,8 @@ class CloudDriveWebhook(_PluginBase):
             "password": "",
             "use_ssl": False,
             "path_mappings": "",
-            "enable_sync": False
+            "enable_sync": False,
+            "refresh_media_library": False
         }
 
     def get_page(self) -> list:
@@ -1636,7 +1673,7 @@ class CloudDriveWebhook(_PluginBase):
 
     def _send_refresh_notification(self, file_path: str):
         """
-        发送入库通知
+        发送入库通知并处理媒体库刷新
         
         Args:
             file_path: 文件路径
@@ -1658,7 +1695,12 @@ class CloudDriveWebhook(_PluginBase):
             if mediainfo:
                 logger.info(f"识别到媒体信息：{mediainfo.title_year}")
                 
-                # 创建TransferInfo对象
+                # 更新媒体图片
+                transfer_chain.obtain_images(mediainfo=mediainfo)
+                
+                # 如果启用了媒体库刷新，执行刮削和媒体库刷新
+                if self._refresh_media_library:
+                    self._process_media_library_refresh(file_path_obj, meta, mediainfo)
                 
                 # 创建FileItem对象
                 file_item = FileItem(
@@ -1697,6 +1739,59 @@ class CloudDriveWebhook(_PluginBase):
             
         except Exception as e:
             logger.warning(f"发送入库通知失败：{str(e)}")
+
+    def _process_media_library_refresh(self, file_path_obj: Path, meta: MetaInfoPath, mediainfo):
+        """
+        处理媒体库刷新（刮削和Emby/Jellyfin媒体库刷新）
+        
+        Args:
+            file_path_obj: 文件路径对象
+            meta: 媒体元信息
+            mediainfo: 媒体信息
+        """
+        try:
+            logger.info(f"开始处理媒体库刷新：{file_path_obj}")
+            
+            # 发送刮削事件 - 使用父目录作为根，传入完整文件路径列表，并强制覆盖
+            try:
+                parent = file_path_obj.parent if file_path_obj.is_file() else file_path_obj
+                parent_item = FileItem(
+                    storage="local",
+                    path=str(parent),
+                    type="dir",
+                    name=parent.name
+                )
+                eventmanager.send_event(EventType.MetadataScrape, {
+                    'meta': meta,
+                    'mediainfo': mediainfo,
+                    'fileitem': parent_item,
+                    'file_list': [str(file_path_obj)],
+                    'overwrite': True
+                })
+                logger.info(f"已发送刮削事件：{file_path_obj.name}")
+            except Exception as e:
+                logger.warning(f"发送刮削事件失败：{str(e)}")
+
+            # 刷新Emby/Jellyfin媒体库（按定位库与对象刷新）
+            try:
+                mediaserver_chain = MediaServerChain()
+                parent = file_path_obj.parent if file_path_obj.is_file() else file_path_obj
+                
+                refresh_item = RefreshMediaItem(
+                    title=mediainfo.title,
+                    year=str(mediainfo.year) if mediainfo.year else None,
+                    type=mediainfo.type.value if mediainfo.type else None,
+                    category=mediainfo.category,
+                    target_path=str(parent)
+                )
+                # 通过处理链调用模块方法
+                mediaserver_chain.run_module("refresh_library_by_items", items=[refresh_item])
+                logger.info("已触发媒体库刷新")
+            except Exception as e:
+                logger.warning(f"触发媒体库刷新失败：{str(e)}")
+                
+        except Exception as e:
+            logger.error(f"处理媒体库刷新时发生错误：{str(e)}")
 
     def _sync_file_to_targets(self, source_file_path: str, sync_targets: list[str]) -> dict:
         """
