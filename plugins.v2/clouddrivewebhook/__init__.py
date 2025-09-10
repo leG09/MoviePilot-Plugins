@@ -26,6 +26,7 @@ from app.schemas.types import MediaType, EventType
 from app.schemas.mediaserver import RefreshMediaItem
 from app.schemas.system import MediaServerConf
 from app.helper.service import ServiceConfigHelper
+from app.helper.mediaserver import MediaServerHelper
 from app.core.event import eventmanager
 from app.log import logger
 
@@ -67,6 +68,8 @@ class CloudDriveWebhook(_PluginBase):
         self._enable_sync = config.get("enable_sync", False) if config else False
         self._refresh_media_library = config.get("refresh_media_library", False) if config else False
         self._selected_mediaserver = config.get("selected_mediaserver", "") if config else ""
+        # Emby路径前缀（用于拼接传入的file_path）
+        self._emby_path_prefix = config.get("emby_path_prefix", "") if config else ""
         self._emby_host = ""
         self._emby_api_key = ""
         self._emby_libraries = []
@@ -87,10 +90,11 @@ class CloudDriveWebhook(_PluginBase):
         # 启动刷新线程
         self._start_refresh_thread()
         
-        # 如果启用了媒体库刷新，从MoviePilot媒体库配置中获取Emby信息
-        if self._refresh_media_library and self._selected_mediaserver:
+        # 如果选择了媒体库服务器，从MoviePilot媒体库配置中获取Emby信息
+        if self._selected_mediaserver:
             self._load_emby_config_from_mediaserver()
-            if self._emby_host and self._emby_api_key:
+            # 如果启用了媒体库刷新且成功获取到Emby信息，则加载媒体库
+            if self._refresh_media_library and self._emby_host and self._emby_api_key:
                 self._load_emby_libraries()
         
         logger.info(f"CloudDrive Webhook插件初始化完成，启用状态: {self._enabled}")
@@ -366,20 +370,37 @@ class CloudDriveWebhook(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VSelect",
                                         "props": {
                                             "model": "selected_mediaserver",
-                                            "label": "选择媒体库服务器",
+                                            "label": "媒体服务器",
                                             "placeholder": "请选择已配置的Emby/Jellyfin服务器",
-                                            "items": [],
-                                            "item-title": "name",
-                                            "item-value": "name",
+                                            "items": [{"title": config.name, "value": config.name}
+                                                      for config in MediaServerHelper().get_configs().values()
+                                                      if config.enabled and config.type in ['emby', 'jellyfin']],
+                                            "item-title": "title",
+                                            "item-value": "value",
                                             "return-object": False,
                                             "clearable": True,
                                             "hint": "从MoviePilot已配置的媒体库服务器中选择，将自动获取服务器地址和API密钥"
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "emby_path_prefix",
+                                            "label": "路径前缀",
+                                            "placeholder": "/mnt/CloudDrive",
+                                            "hint": "与文件路径拼接后提交给媒体服务器。例如：/mnt/CloudDrive + /gd8/media  => /mnt/CloudDrive/gd8/media"
                                         }
                                     }
                                 ]
@@ -398,7 +419,7 @@ class CloudDriveWebhook(_PluginBase):
                                         "props": {
                                             "model": "path_mappings",
                                             "label": "路径映射配置",
-                                            "placeholder": "每行一个映射，格式：源路径 => 目标路径[:同步目标1:同步目标2]\n例如：\n/gd10/media/ => /GoogleDrive2/media/:/115/media:/aliyun/media\n/gd5/media/ => /GoogleDrive5/media/",
+                                            "placeholder": "每行一个映射，格式：源路径 => 目标路径[:同步目标1:同步目标2]\\n例如：\\n/gd10/media/ => /GoogleDrive2/media/:/115/media:/aliyun/media\\n/gd5/media/ => /GoogleDrive5/media/",
                                             "rows": 5,
                                             "hint": "用于将接收到的文件路径映射到实际的CloudDrive路径。启用同步后，文件将自动复制到冒号分隔的同步目标目录"
                                         }
@@ -421,7 +442,8 @@ class CloudDriveWebhook(_PluginBase):
             "path_mappings": "",
             "enable_sync": False,
             "refresh_media_library": False,
-            "selected_mediaserver": ""
+            "selected_mediaserver": "",
+            "emby_path_prefix": ""
         }
 
     def get_page(self) -> list:
@@ -1970,22 +1992,31 @@ class CloudDriveWebhook(_PluginBase):
     def _load_emby_config_from_mediaserver(self):
         """从MoviePilot媒体库配置中获取Emby服务器信息"""
         try:
+            logger.info(f"开始从媒体库配置获取Emby信息，选择的服务器: {self._selected_mediaserver}")
+            
             if not self._selected_mediaserver:
                 logger.warning("未选择媒体库服务器")
                 return
             
-            # 获取所有媒体库配置
-            mediaserver_configs = ServiceConfigHelper.get_mediaserver_configs()
+            # 使用MediaServerHelper获取媒体库配置
+            mediaserver_configs = MediaServerHelper().get_configs()
+            logger.info(f"获取到 {len(mediaserver_configs)} 个媒体库配置")
+            
+            # 打印所有可用的配置（用于调试）
+            for config_name, config in mediaserver_configs.items():
+                logger.debug(f"配置: {config_name} -> 名称: {config.name}, 类型: {config.type}, 启用: {config.enabled}")
             
             # 查找选中的媒体库配置
             selected_config = None
-            for config in mediaserver_configs:
+            for config_name, config in mediaserver_configs.items():
                 if config.name == self._selected_mediaserver and config.enabled:
                     selected_config = config
+                    logger.info(f"找到匹配的配置: {config_name}")
                     break
             
             if not selected_config:
                 logger.error(f"未找到启用的媒体库配置: {self._selected_mediaserver}")
+                logger.error(f"可用的配置: {[config.name for config in mediaserver_configs.values() if config.enabled]}")
                 return
             
             # 检查是否为Emby或Jellyfin
@@ -1995,24 +2026,30 @@ class CloudDriveWebhook(_PluginBase):
             
             # 从配置中提取服务器信息
             config_data = selected_config.config or {}
+            logger.debug(f"配置数据: {config_data}")
+            
             self._emby_host = config_data.get('host', '')
-            self._emby_api_key = config_data.get('api_key', '')
+            self._emby_api_key = config_data.get('apikey', '')
+            
+            logger.info(f"提取的Emby信息: host={self._emby_host}, api_key={'已设置' if self._emby_api_key else '未设置'}")
             
             if self._emby_host and self._emby_api_key:
                 logger.info(f"成功从媒体库配置获取Emby信息: {self._emby_host}")
             else:
                 logger.warning(f"媒体库配置中缺少必要的Emby信息: host={bool(self._emby_host)}, api_key={bool(self._emby_api_key)}")
+                logger.warning(f"配置数据键: {list(config_data.keys())}")
                 
         except Exception as e:
-            logger.error(f"从媒体库配置获取Emby信息失败: {str(e)}")
+            logger.error(f"从媒体库配置获取Emby信息失败: {str(e)}", exc_info=True)
 
     def _get_available_mediaservers(self):
         """获取可用的媒体库服务器列表"""
         try:
-            mediaserver_configs = ServiceConfigHelper.get_mediaserver_configs()
+            # 使用MediaServerHelper获取媒体服务器配置
+            mediaserver_configs = MediaServerHelper().get_configs()
             available_servers = []
             
-            for config in mediaserver_configs:
+            for config_name, config in mediaserver_configs.items():
                 if config.enabled and config.type in ['emby', 'jellyfin']:
                     available_servers.append({
                         'name': config.name,
@@ -2162,6 +2199,16 @@ class CloudDriveWebhook(_PluginBase):
             if not self._emby_host or not self._emby_api_key:
                 logger.warning("Emby服务器地址或API密钥未配置，跳过直接API调用")
                 return False
+            
+            # 如果配置了路径前缀，则与传入的file_path拼接
+            if self._emby_path_prefix:
+                prefix = self._emby_path_prefix.rstrip('/')
+                # 仅当file_path未以prefix开头时拼接，避免重复
+                if not file_path.startswith(prefix + '/') and not file_path.startswith(prefix):
+                    if not file_path.startswith('/'):
+                        file_path = '/' + file_path
+                    file_path = prefix + file_path
+                logger.debug(f"应用路径前缀后文件路径: {file_path}")
             
             # 查找包含该路径的媒体库
             target_library = self._find_target_library(file_path)
