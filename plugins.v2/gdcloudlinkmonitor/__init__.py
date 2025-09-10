@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.9.0" # 添加转移前目录刷新功能
+    plugin_version = "3.0.0" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -136,6 +136,87 @@ class GDCloudLinkMonitor(_PluginBase):
     _refresh_before_transfer = False  # 转移前是否刷新目录
     _refresh_api_url = ""  # 刷新API完整地址
     _refresh_api_key = ""  # 刷新API密钥
+    
+    # AI 规范命名相关属性
+    _ai_rename_enabled = False
+    _ai_api_url = ""
+    _ai_model = "gemini-2.0-flash"
+    _ai_api_keys: List[str] = []  # 多Key支持
+    _ai_key_index: int = 0
+    _ai_keys_file: Path = None
+    _ai_timeout = 30
+    _ai_prompt_template = (
+        "请将以下影视文件规范化为标准命名：\n"
+        "- 输入：一个实际文件的完整路径\n"
+        "- 输出：严格JSON，仅包含字段 directory_name(目录名，不含扩展名)、file_name(文件名，含扩展名)\n"
+        "- 规则：\n"
+        "  1) 若为剧集(电视/动漫)，必须包含 SxxEyy；\n"
+        "  2) 若为电影，不要包含季集信息；\n"
+        "  3) 若原始路径(目录或文件)包含中文，请保留中文标题，不要翻译；仅分辨率/编码/音频/发布组等技术信息使用英文；\n"
+        "  4) 若原始路径不含中文，则标题用英文；\n"
+        "  5) 应尽量包含：标题、年份、分辨率、视频编码、音频信息、发布组；\n"
+        "  6) 目录名与文件名(去扩展名)保持一致。\n"
+        "示例(剧集)：{\"directory_name\":\"孤注一掷：托特纳姆热刺.S01E01.1080p.WEB-DL.H265.DDP5.1-GROUP\",\"file_name\":\"孤注一掷：托特纳姆热刺.S01E01.1080p.WEB-DL.H265.DDP5.1-GROUP.mkv\"}\n"
+        "示例(电影)：{\"directory_name\":\"无名之辈：否极泰来.2025.1080p.WEB-DL.H265.DDP5.1-GROUP\",\"file_name\":\"无名之辈：否极泰来.2025.1080p.WEB-DL.H265.DDP5.1-GROUP.mkv\"}"
+    )
+    
+    # 运行期缓存：已处理过AI规范化的目录，避免重复请求
+    _ai_processed_dirs = set()
+    # 持久化记录：已规范化的目录/文件，避免后续再调用AI
+    _ai_state_file: Path = None
+    _ai_normalized_dirs = set()
+    _ai_normalized_files = set()
+
+    def _load_ai_normalized_state(self):
+        try:
+            if not self._ai_state_file or not self._ai_state_file.exists():
+                return
+            with open(self._ai_state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                dirs = data.get('dirs') or []
+                files = data.get('files') or []
+                self._ai_normalized_dirs = set(dirs)
+                self._ai_normalized_files = set(files)
+                logger.info(f"已加载AI规范化记录：目录{len(self._ai_normalized_dirs)}个，文件{len(self._ai_normalized_files)}个")
+        except Exception as e:
+            logger.debug(f"加载AI规范化记录失败：{e}")
+
+    def _save_ai_normalized_state(self):
+        try:
+            if not self._ai_state_file:
+                return
+            payload = {
+                'dirs': sorted(list(self._ai_normalized_dirs)),
+                'files': sorted(list(self._ai_normalized_files))
+            }
+            with open(self._ai_state_file, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"保存AI规范化记录失败：{e}")
+
+    def _load_ai_keys_state(self):
+        try:
+            if not self._ai_keys_file or not self._ai_keys_file.exists():
+                return []
+            with open(self._ai_keys_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                keys = data.get('keys') if isinstance(data, dict) else None
+                if isinstance(keys, list):
+                    return [k for k in keys if isinstance(k, str) and k]
+                if isinstance(data, list):
+                    return [k for k in data if isinstance(k, str) and k]
+        except Exception as e:
+            logger.debug(f"加载AI密钥记录失败：{e}")
+        return []
+
+    def _save_ai_keys_state(self, keys: List[str]):
+        try:
+            if not self._ai_keys_file:
+                return
+            with open(self._ai_keys_file, 'w', encoding='utf-8') as f:
+                json.dump({'keys': keys}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"保存AI密钥记录失败：{e}")
 
     def _save_state_to_file(self):
         """将轮询状态保存到文件"""
@@ -645,6 +726,251 @@ class GDCloudLinkMonitor(_PluginBase):
             self._recovery_thread.start()
             logger.info("恢复检查线程已启动")
 
+    def _call_ai_normalize_naming(self, file_path: str) -> Optional[Dict[str, str]]:
+        """
+        调用AI接口生成规范化命名，返回 {"directory_name": str, "file_name": str}
+        """
+        if not self._ai_rename_enabled:
+            return None
+        if not self._ai_api_url or not self._ai_api_keys:
+            logger.debug("AI重命名未配置(缺少API Key)，跳过")
+            return None
+        try:
+            prompt = f"{self._ai_prompt_template}\n原始文件路径：{file_path}"
+            payload = {
+                "contents": [
+                    {"parts": [{"text": prompt}]}
+                ],
+                # 提示服务端按JSON返回
+                "generationConfig": {
+                    "response_mime_type": "application/json"
+                }
+            }
+            headers = {
+                "Content-Type": "application/json"
+            }
+            # 兼容用户自定义URL：优先使用配置的完整URL；key通过查询参数传递
+            url = self._ai_api_url or f"https://generativelanguage.googleapis.com/v1beta/models/{self._ai_model}:generateContent"
+            # 轮换Key：若多Key存在，按索引取用
+            if self._ai_key_index < 0 or self._ai_key_index >= len(self._ai_api_keys):
+                self._ai_key_index = 0
+            active_key = self._ai_api_keys[self._ai_key_index]
+            params = {"key": active_key}
+            logger.info("调用AI重命名接口")
+            resp = requests.post(url, headers=headers, params=params, json=payload, timeout=self._ai_timeout)
+            if resp.status_code != 200:
+                try:
+                    logger.info(f"AI响应体: {resp.text}")
+                except Exception:
+                    pass
+                logger.warning(f"AI接口返回状态码异常: {resp.status_code}")
+                # 401/403/400等认为可能Key失效，尝试自动切换
+                if self._ai_api_keys and resp.status_code in (400, 401, 403):
+                    prev = self._ai_key_index
+                    self._ai_key_index = (self._ai_key_index + 1) % len(self._ai_api_keys)
+                    if self._ai_key_index != prev:
+                        logger.info(f"AI密钥可能失效，自动切换至索引 {self._ai_key_index}")
+                return None
+            data = resp.json()
+            # 解析Gemini输出
+            text = None
+            try:
+                candidates = data.get("candidates") or []
+                for c in candidates:
+                    content = c.get("content") or {}
+                    parts = content.get("parts") or []
+                    for p in parts:
+                        if isinstance(p, dict) and p.get("text"):
+                            text = p.get("text")
+                            break
+                    if text:
+                        break
+            except Exception:
+                pass
+            if not text:
+                # 兼容直接返回JSON
+                text = json.dumps(data)
+            # 去除```包裹
+            if isinstance(text, str):
+                cleaned = text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = re.sub(r"^```[a-zA-Z0-9]*\n", "", cleaned)
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3]
+                # 提取JSON对象
+                match = re.search(r"\{[\s\S]*\}", cleaned)
+                if match:
+                    cleaned = match.group(0)
+                try:
+                    result = json.loads(cleaned)
+                except Exception:
+                    logger.warning("AI返回内容解析失败，跳过")
+                    return None
+            else:
+                return None
+            directory_name = (result.get("directory_name") or "").strip()
+            file_name = (result.get("file_name") or "").strip()
+            if not directory_name or not file_name:
+                logger.warning("AI返回缺少必要字段，跳过")
+                return None
+            # 基本非法字符清理
+            directory_name = re.sub(r"[\\/:*?\"<>|]", " ", directory_name).strip()
+            file_name = re.sub(r"[\\/:*?\"<>|]", " ", file_name).strip()
+            return {"directory_name": directory_name, "file_name": file_name}
+        except requests.exceptions.Timeout:
+            logger.warning("AI接口请求超时")
+            return None
+        except Exception as e:
+            logger.warning(f"AI接口调用异常: {e}")
+            return None
+
+    def _apply_ai_renaming(self, file_path: Path, suggestion: Dict[str, str]) -> bool:
+        """
+        根据AI建议安全重命名目录与文件
+        """
+        try:
+            if not suggestion:
+                return False
+            current_dir = file_path.parent
+            current_parent = current_dir.parent
+            original_ext = file_path.suffix
+            new_dir_name = Path(suggestion.get("directory_name")).name
+            new_file_name = Path(suggestion.get("file_name")).name
+            # 确保扩展名一致
+            if Path(new_file_name).suffix.lower() != original_ext.lower():
+                new_file_name = f"{Path(new_file_name).stem}{original_ext}"
+            target_dir = current_parent / new_dir_name
+            target_file = target_dir / new_file_name
+            # 如果目录需要改名且不存在
+            if target_dir.exists() and not target_dir.samefile(current_dir):
+                # 存在同名目录，避免覆盖
+                logger.warning(f"目标目录已存在，放弃AI重命名：{target_dir}")
+                return False
+            # 执行目录改名
+            if not target_dir.samefile(current_dir):
+                current_dir.rename(target_dir)
+                logger.info(f"目录已重命名：{current_dir} -> {target_dir}")
+            # 目录改名后更新文件路径
+            moved_file_path = target_dir / file_path.name
+            # 执行文件改名（如需要）
+            if moved_file_path.name != new_file_name:
+                if (target_dir / new_file_name).exists():
+                    logger.warning(f"目标文件已存在，放弃AI重命名：{target_dir / new_file_name}")
+                    return False
+                moved_file_path.rename(target_file)
+                logger.info(f"文件已重命名：{moved_file_path} -> {target_file}")
+            return True
+        except Exception as e:
+            logger.warning(f"AI重命名失败: {e}")
+            return False
+
+    def _apply_ai_batch_renaming(self, directory_path: Path, suggestion: Dict[str, str], sample_file: Path) -> bool:
+        """
+        基于一次AI建议，批量重命名目录及其中同剧集的所有媒体文件。
+        - 先尝试目录改名为 suggestion.directory_name（若不同且无冲突）。
+        - 若建议文件名包含 SxxEyy，则按集号生成各自文件名；保留原扩展名。
+        - 若无法识别季/集，则回退为单文件改名。
+        """
+        try:
+            if not suggestion:
+                return False
+            template_name = suggestion.get("file_name") or ""
+            if not template_name:
+                return False
+            # 目录改名（若需要）
+            desired_dir_name = (suggestion.get("directory_name") or "").strip()
+            if desired_dir_name:
+                desired_dir_name = re.sub(r"[\\/:*?\"<>|]", " ", desired_dir_name).strip()
+            current_dir = directory_path
+            if desired_dir_name and desired_dir_name != current_dir.name:
+                target_dir = current_dir.parent / Path(desired_dir_name).name
+                try:
+                    if target_dir.exists() and not target_dir.samefile(current_dir):
+                        logger.warning(f"批量目录重命名跳过，目标目录已存在：{target_dir}")
+                    else:
+                        current_dir.rename(target_dir)
+                        logger.info(f"目录已重命名(批量)：{current_dir} -> {target_dir}")
+                        # 更新工作目录与样本文件路径
+                        directory_path = target_dir
+                        sample_file = target_dir / sample_file.name
+                except Exception as e:
+                    logger.warning(f"批量目录重命名失败，继续文件重命名：{e}")
+            # 匹配模板中的季集信息
+            m = re.search(r"S(\d{1,2}).*?E(\d{1,3})", template_name, re.IGNORECASE)
+            if not m:
+                # 无季集，退回单文件改名
+                return self._apply_ai_renaming(sample_file, suggestion)
+            season_width = len(m.group(1))
+            episode_width = len(m.group(2))
+
+            # 构建替换函数：用指定季集数字替换模板中的季集部分
+            def build_name(season_num: int, episode_num: int, file_suffix: str) -> str:
+                def repl(match: re.Match) -> str:
+                    s_str = f"{season_num:0{season_width}d}"
+                    e_str = f"{episode_num:0{episode_width}d}"
+                    return f"S{s_str}E{e_str}"
+                new_base = re.sub(r"S\d{1,2}.*?E\d{1,3}", repl, template_name, flags=re.IGNORECASE)
+                # 保持每个文件自己的扩展名
+                base_no_ext = Path(new_base).stem
+                return f"{base_no_ext}{file_suffix}"
+
+            # 列出目录下所有媒体文件
+            file_list = SystemUtils.list_files(directory_path, settings.RMT_MEDIAEXT)
+            if not file_list:
+                return False
+
+            # 扫描各文件的季集信息
+            success_any = False
+            for f in file_list:
+                try:
+                    f_path: Path = Path(f)
+                    meta = MetaInfoPath(f_path)
+                    season = meta.begin_season if meta and meta.begin_season is not None else None
+                    episode = meta.begin_episode if meta and meta.begin_episode is not None else None
+                    # 如果无法识别集号，尝试从文件名正则提取
+                    if episode is None:
+                        mm = re.search(r"S(\d{1,2}).*?E(\d{1,3})", f_path.name, re.IGNORECASE)
+                        if mm:
+                            if season is None:
+                                season = int(mm.group(1))
+                            episode = int(mm.group(2))
+                    if episode is None:
+                        continue
+                    # 若仍无季号，用模板中的季号
+                    if season is None:
+                        season = int(m.group(1))
+
+                    new_name = build_name(season, episode, f_path.suffix)
+                    if f_path.name == new_name:
+                        continue
+                    target_path = f_path.parent / new_name
+                    if target_path.exists():
+                        logger.warning(f"批量重命名跳过，目标已存在：{target_path}")
+                        continue
+                    f_path.rename(target_path)
+                    logger.info(f"批量重命名：{f_path} -> {target_path}")
+                    # 写入文件级规范化记录
+                    try:
+                        self._ai_normalized_files.add(str(target_path))
+                    except Exception:
+                        pass
+                    success_any = True
+                except Exception as e:
+                    logger.warning(f"批量重命名单个文件失败：{f}，原因：{e}")
+                    continue
+
+            # 目录级成功即记录目录
+            if success_any:
+                try:
+                    self._ai_normalized_dirs.add(str(directory_path))
+                    self._save_ai_normalized_state()
+                except Exception:
+                    pass
+            return success_any
+        except Exception as e:
+            logger.warning(f"批量重命名失败：{e}")
+            return False
+
     def init_plugin(self, config: dict = None):
         self.transferhis = TransferHistoryOper()
         self.downloadhis = DownloadHistoryOper()
@@ -656,12 +982,18 @@ class GDCloudLinkMonitor(_PluginBase):
         
         # 初始化状态文件路径
         self._state_file = self.get_data_path() / "cloudlinkmonitor_state.json"
+        # 初始化AI规范化记录文件
+        self._ai_state_file = self.get_data_path() / "cloudlinkmonitor_ai_normalized.json"
+        # 初始化AI密钥记录文件
+        self._ai_keys_file = self.get_data_path() / "cloudlinkmonitor_ai_keys.json"
         
         # 清空配置并在启动时从文件加载状态
         self._dirconf = {}
         self._transferconf = {}
         self._overwrite_mode = {}
         self._round_robin_index = self._load_state_from_file()
+        # 加载AI规范化记录
+        self._load_ai_normalized_state()
 
         # 读取配置
         if config:
@@ -694,6 +1026,22 @@ class GDCloudLinkMonitor(_PluginBase):
             self._refresh_before_transfer = config.get("refresh_before_transfer", False)
             self._refresh_api_url = config.get("refresh_api_url", "")
             self._refresh_api_key = config.get("refresh_api_key", "")
+            
+            # AI 规范命名配置（提示词为内置，不允许前端自定义）
+            self._ai_rename_enabled = config.get("ai_rename_enabled", False)
+            self._ai_api_url = config.get("ai_api_url", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent")
+            self._ai_model = config.get("ai_model", "gemini-2.0-flash")
+            if 'ai_api_keys' in config:
+                keys_text = config.get("ai_api_keys", "")
+                # 配置中提供了字段：以用户输入为准（覆盖式保存，可清空）
+                input_keys = [k.strip() for k in re.split(r"[\n,]", keys_text or "") if k.strip()]
+                self._ai_api_keys = input_keys
+                self._save_ai_keys_state(self._ai_api_keys)
+            else:
+                # 未提供字段：沿用持久化文件中的密钥
+                self._ai_api_keys = self._load_ai_keys_state()
+            self._ai_key_index = 0 if self._ai_api_keys else -1
+            self._ai_timeout = config.get("ai_timeout", 30)
 
         # 停止现有任务
         self.stop_service()
@@ -845,6 +1193,14 @@ class GDCloudLinkMonitor(_PluginBase):
             "refresh_before_transfer": self._refresh_before_transfer,
             "refresh_api_url": self._refresh_api_url,
             "refresh_api_key": self._refresh_api_key,
+            # AI 规范命名
+            "ai_rename_enabled": self._ai_rename_enabled,
+            "ai_api_url": self._ai_api_url,
+            "ai_model": self._ai_model,
+            # 为保护密钥，不在前端回显单Key；仅对多Key以掩码数量显示
+            "ai_api_keys": "\n".join(self._ai_api_keys) if self._ai_api_keys else "",
+            "ai_timeout": self._ai_timeout,
+            "ai_prompt_template": self._ai_prompt_template,
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -908,6 +1264,34 @@ class GDCloudLinkMonitor(_PluginBase):
                 transfer_history = self.transferhis.get_by_src(event_path)
                 if transfer_history:
                     logger.info("文件已处理过：%s" % event_path)
+                    # 触发AI规范命名
+                    try:
+                        if not self._ai_rename_enabled:
+                            logger.debug("AI规范命名未启用，跳过触发")
+                        else:
+                            ep_path = Path(event_path)
+                            dir_path = ep_path.parent
+                            dir_key = str(dir_path)
+                            if dir_key in self._ai_normalized_dirs:
+                                logger.info(f"目录已记录为已规范命名，跳过AI：{dir_key}")
+                            elif dir_key in self._ai_processed_dirs:
+                                logger.info(f"目录本次运行已触发过AI，跳过重复调用：{dir_key}")
+                            else:
+                                logger.info(f"准备触发AI规范命名，目录：{dir_key}")
+                                ai_suggestion = self._call_ai_normalize_naming(event_path)
+                                if ai_suggestion:
+                                    # 优先尝试批量重命名
+                                    batch_ok = self._apply_ai_batch_renaming(directory_path=dir_path, suggestion=ai_suggestion, sample_file=ep_path)
+                                    if not batch_ok:
+                                        # 回退到单文件重命名
+                                        self._apply_ai_renaming(ep_path, ai_suggestion)
+                                    # 标记目录已处理，避免重复请求
+                                    self._ai_processed_dirs.add(dir_key)
+                                    # 记录规范化已完成
+                                    self._ai_normalized_dirs.add(dir_key)
+                                    self._save_ai_normalized_state()
+                    except Exception as e:
+                        logger.debug(f"AI重命名触发异常: {e}")
                     return
 
                 # 回收站及隐藏的文件不处理
@@ -1102,6 +1486,29 @@ class GDCloudLinkMonitor(_PluginBase):
                             text=f"原因：{transferinfo.message or '未知'}",
                             image=mediainfo.get_message_image()
                         )
+                    # 入库因同名冲突失败时触发AI规范命名
+                    try:
+                        if self._ai_rename_enabled:
+                            conflict = False
+                            msg_text = (transferinfo.message or "")
+                            if any(k in msg_text for k in ["同名", "已存在", "exist", "exists"]):
+                                conflict = True
+                            if conflict:
+                                ep_path = Path(event_path)
+                                dir_path = ep_path.parent
+                                dir_key = str(dir_path)
+                                if dir_key not in self._ai_processed_dirs and dir_key not in self._ai_normalized_dirs:
+                                    logger.info("检测到同名冲突，触发AI规范命名流程(失败分支)")
+                                    ai_suggestion = self._call_ai_normalize_naming(event_path)
+                                    if ai_suggestion:
+                                        batch_ok = self._apply_ai_batch_renaming(directory_path=dir_path, suggestion=ai_suggestion, sample_file=ep_path)
+                                        if not batch_ok:
+                                            self._apply_ai_renaming(ep_path, ai_suggestion)
+                                        self._ai_processed_dirs.add(dir_key)
+                                        self._ai_normalized_dirs.add(dir_key)
+                                        self._save_ai_normalized_state()
+                    except Exception as e:
+                        logger.debug(f"AI重命名(失败分支)触发异常: {e}")
                     return
 
                 if self._history:
@@ -1551,6 +1958,56 @@ class GDCloudLinkMonitor(_PluginBase):
                             }
                         ]
                     },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'ai_rename_enabled', 'label': '启用AI规范命名'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'ai_api_url', 'label': 'AI接口地址', 'placeholder': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'}
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'ai_model', 'label': 'AI模型', 'placeholder': 'gemini-2.0-flash'}
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol', 'props': {'cols': 12},
+                                'content': [{
+                                    'component': 'VTextarea',
+                                    'props': {'model': 'ai_api_keys', 'label': 'AI API Keys(多行/逗号分隔，按顺序自动切换)', 'rows': 4,
+                                              'placeholder': 'key1\nkey2\nkey3'}
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol', 'props': {'cols': 12, 'md': 6},
+                            'content': [{
+                                'component': 'VTextField',
+                                'props': {'model': 'ai_timeout', 'label': 'AI超时(秒)', 'placeholder': '30'}
+                            }]
+                        }]
+                    },
                 ]
             }
         ], {
@@ -1559,7 +2016,9 @@ class GDCloudLinkMonitor(_PluginBase):
             "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0,
             "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
             "recovery_check_interval": 1800, "mount_path_mapping": "",
-            "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": ""
+            "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
+            "ai_rename_enabled": False, "ai_api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+            "ai_model": "gemini-2.0-flash", "ai_timeout": 30
         }
 
     def get_page(self) -> List[dict]:
