@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.0" 
+    plugin_version = "3.0.1" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -653,6 +653,7 @@ class GDCloudLinkMonitor(_PluginBase):
                 "path_type": "source",
                 "data": [
                     {
+                        "action": "create",
                         "source_file": file_path
                     }
                 ]

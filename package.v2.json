@@ -15,12 +15,13 @@
     "name": "多目录实时监控",
     "description": "监控云盘目录文件变化，自动转移媒体文件，支持轮询分发和网盘限制检测。",
     "labels": "云盘,工具",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "icon": "Linkease_A.png",
     "author": "leGO9",
     "level": 1,
     "compatible": true,
     "history": {
+      "v3.0.1": "添加action字段，只处理action为'create'的数据",
       "v3.0.0": "添加AI规范化命名功能",
       "v2.9.0": "添加转移前目录刷新功能",
       "v2.8.1": "修复路径匹配问题，添加挂载路径映射配置"
