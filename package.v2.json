@@ -54,12 +54,13 @@
     "name": "CloudDrive目录刷新Webhook",
     "description": "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持路径映射、请求合并、登录缓存和智能通知。",
     "labels": "云盘,Webhook,gRPC",
-    "version": "2.2",
+    "version": "2.3",
     "icon": "clouddrive.png",
     "author": "leGO9",
     "level": 1,
     "compatible": true,
     "history": {
+      "v2.3":"接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步和媒体库刷新",
       "v2.2":"接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步",
       "v2.1": "功能增强版本：添加路径映射、请求合并、登录缓存、智能通知、自动依赖管理",
       "v2.0": "纯Python gRPC版本：移除CLI依赖，直接使用gRPC通信"
