@@ -1,6 +1,8 @@
 import grpc
 import threading
 import time
+import aiohttp
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional
 from collections import defaultdict
@@ -22,8 +24,20 @@ from app.chain.mediaserver import MediaServerChain
 from app.core.metainfo import MetaInfoPath
 from app.schemas.types import MediaType, EventType
 from app.schemas.mediaserver import RefreshMediaItem
+from app.schemas.system import MediaServerConf
+from app.helper.service import ServiceConfigHelper
 from app.core.event import eventmanager
 from app.log import logger
+
+
+class EmbyLibraryInfo:
+    """Emby媒体库信息"""
+    
+    def __init__(self, Id: str, Name: str, CollectionType: str = None, Locations: list = None):
+        self.Id = Id
+        self.Name = Name
+        self.CollectionType = CollectionType
+        self.Locations = Locations or []
 
 
 class CloudDriveWebhook(_PluginBase):
@@ -31,10 +45,10 @@ class CloudDriveWebhook(_PluginBase):
     
     # 插件信息
     plugin_name = "CloudDriveWebhook"
-    plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步和媒体库刷新"
+    plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步和自动从MoviePilot媒体库配置获取Emby信息进行刷新"
     plugin_icon = "clouddrive.png"
     plugin_color = "#00BFFF"
-    plugin_version = "2.3"
+    plugin_version = "2.5"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "clouddrivewebhook"
@@ -52,6 +66,10 @@ class CloudDriveWebhook(_PluginBase):
         self._path_mappings = config.get("path_mappings", "") if config else ""
         self._enable_sync = config.get("enable_sync", False) if config else False
         self._refresh_media_library = config.get("refresh_media_library", False) if config else False
+        self._selected_mediaserver = config.get("selected_mediaserver", "") if config else ""
+        self._emby_host = ""
+        self._emby_api_key = ""
+        self._emby_libraries = []
         
         # gRPC相关
         self._channel = None
@@ -68,6 +86,12 @@ class CloudDriveWebhook(_PluginBase):
         
         # 启动刷新线程
         self._start_refresh_thread()
+        
+        # 如果启用了媒体库刷新，从MoviePilot媒体库配置中获取Emby信息
+        if self._refresh_media_library and self._selected_mediaserver:
+            self._load_emby_config_from_mediaserver()
+            if self._emby_host and self._emby_api_key:
+                self._load_emby_libraries()
         
         logger.info(f"CloudDrive Webhook插件初始化完成，启用状态: {self._enabled}")
 
@@ -96,6 +120,20 @@ class CloudDriveWebhook(_PluginBase):
                 "methods": ["GET"],
                 "summary": "测试CloudDrive连接",
                 "description": "测试CloudDrive服务器连接和登录"
+            },
+            {
+                "path": "/test_emby",
+                "endpoint": self.test_emby_connection,
+                "methods": ["GET"],
+                "summary": "测试Emby连接",
+                "description": "测试Emby服务器连接和媒体库加载"
+            },
+            {
+                "path": "/mediaservers",
+                "endpoint": self.get_mediaservers,
+                "methods": ["GET"],
+                "summary": "获取可用媒体库服务器",
+                "description": "获取MoviePilot中已配置的Emby/Jellyfin媒体库服务器列表"
             }
         ]
 
@@ -227,7 +265,7 @@ class CloudDriveWebhook(_PluginBase):
                                         "component": "VAlert",
                                         "props": {
                                             "type": "info",
-                                            "text": "媒体库刷新功能：启用后会在文件处理完成后自动刷新Emby/Jellyfin媒体库，触发刮削和媒体信息更新。"
+                                            "text": "媒体库刷新功能：启用后会在文件处理完成后自动刷新Emby/Jellyfin媒体库，触发刮削和媒体信息更新。服务器地址和API密钥将从MoviePilot已配置的媒体库中自动获取。"
                                         }
                                     }
                                 ]
@@ -331,6 +369,31 @@ class CloudDriveWebhook(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "selected_mediaserver",
+                                            "label": "选择媒体库服务器",
+                                            "placeholder": "请选择已配置的Emby/Jellyfin服务器",
+                                            "items": [],
+                                            "item-title": "name",
+                                            "item-value": "name",
+                                            "return-object": False,
+                                            "clearable": True,
+                                            "hint": "从MoviePilot已配置的媒体库服务器中选择，将自动获取服务器地址和API密钥"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "path_mappings",
@@ -357,7 +420,8 @@ class CloudDriveWebhook(_PluginBase):
             "use_ssl": False,
             "path_mappings": "",
             "enable_sync": False,
-            "refresh_media_library": False
+            "refresh_media_library": False,
+            "selected_mediaserver": ""
         }
 
     def get_page(self) -> list:
@@ -1100,6 +1164,106 @@ class CloudDriveWebhook(_PluginBase):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
+    def test_emby_connection(self, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
+        """
+        测试Emby连接
+        
+        Args:
+            apikey: API密钥
+            
+        Returns:
+            Dict: 测试结果
+        """
+        try:
+            logger.info("开始测试Emby连接")
+            
+            # 检查是否选择了媒体库服务器
+            if not self._selected_mediaserver:
+                return {
+                    "success": False,
+                    "message": "请先选择媒体库服务器",
+                    "selected_mediaserver": self._selected_mediaserver
+                }
+            
+            # 从媒体库配置中获取Emby信息
+            self._load_emby_config_from_mediaserver()
+            
+            # 检查配置
+            if not self._emby_host or not self._emby_api_key:
+                return {
+                    "success": False,
+                    "message": f"从媒体库配置 '{self._selected_mediaserver}' 中获取Emby信息失败",
+                    "emby_host": bool(self._emby_host),
+                    "emby_api_key": bool(self._emby_api_key),
+                    "selected_mediaserver": self._selected_mediaserver
+                }
+            
+            # 测试连接
+            url = f"{self._emby_host}/System/Info"
+            params = {"api_key": self._emby_api_key}
+            
+            import requests
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                server_name = data.get('ServerName', 'Unknown')
+                
+                # 尝试加载媒体库
+                self._load_emby_libraries()
+                libraries_count = len(self._emby_libraries)
+                
+                return {
+                    "success": True,
+                    "message": f"连接成功！服务器: {server_name}，媒体库数量: {libraries_count}",
+                    "server_name": server_name,
+                    "libraries_count": libraries_count,
+                    "selected_mediaserver": self._selected_mediaserver,
+                    "emby_host": self._emby_host,
+                    "libraries": [{"id": lib.Id, "name": lib.Name, "type": lib.CollectionType} for lib in self._emby_libraries]
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"连接失败，HTTP状态码: {response.status_code}",
+                    "status_code": response.status_code,
+                    "selected_mediaserver": self._selected_mediaserver,
+                    "emby_host": self._emby_host
+                }
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"测试Emby连接时发生错误：{str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    def get_mediaservers(self, apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
+        """
+        获取可用的媒体库服务器列表
+        
+        Args:
+            apikey: API密钥
+            
+        Returns:
+            Dict: 媒体库服务器列表
+        """
+        try:
+            logger.info("获取可用媒体库服务器列表")
+            
+            available_servers = self._get_available_mediaservers()
+            
+            return {
+                "success": True,
+                "message": f"找到 {len(available_servers)} 个可用的媒体库服务器",
+                "servers": available_servers
+            }
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"获取媒体库服务器列表时发生错误：{str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
     def _check_server_login_status(self) -> bool:
         """
         检查服务器端登录状态（使用token）
@@ -1772,7 +1936,17 @@ class CloudDriveWebhook(_PluginBase):
             except Exception as e:
                 logger.warning(f"发送刮削事件失败：{str(e)}")
 
-            # 刷新Emby/Jellyfin媒体库（按定位库与对象刷新）
+            # 优先使用直接Emby API调用
+            if self._emby_host and self._emby_api_key:
+                logger.info("使用直接Emby API调用进行媒体库刷新")
+                success = self._refresh_emby_library_direct(str(file_path_obj))
+                if success:
+                    logger.info("直接Emby API调用成功")
+                    return
+                else:
+                    logger.warning("直接Emby API调用失败，尝试使用MediaServerChain")
+            
+            # 如果直接API调用失败或未配置，使用MediaServerChain
             try:
                 mediaserver_chain = MediaServerChain()
                 parent = file_path_obj.parent if file_path_obj.is_file() else file_path_obj
@@ -1786,12 +1960,236 @@ class CloudDriveWebhook(_PluginBase):
                 )
                 # 通过处理链调用模块方法
                 mediaserver_chain.run_module("refresh_library_by_items", items=[refresh_item])
-                logger.info("已触发媒体库刷新")
+                logger.info("已触发媒体库刷新（通过MediaServerChain）")
             except Exception as e:
                 logger.warning(f"触发媒体库刷新失败：{str(e)}")
                 
         except Exception as e:
             logger.error(f"处理媒体库刷新时发生错误：{str(e)}")
+
+    def _load_emby_config_from_mediaserver(self):
+        """从MoviePilot媒体库配置中获取Emby服务器信息"""
+        try:
+            if not self._selected_mediaserver:
+                logger.warning("未选择媒体库服务器")
+                return
+            
+            # 获取所有媒体库配置
+            mediaserver_configs = ServiceConfigHelper.get_mediaserver_configs()
+            
+            # 查找选中的媒体库配置
+            selected_config = None
+            for config in mediaserver_configs:
+                if config.name == self._selected_mediaserver and config.enabled:
+                    selected_config = config
+                    break
+            
+            if not selected_config:
+                logger.error(f"未找到启用的媒体库配置: {self._selected_mediaserver}")
+                return
+            
+            # 检查是否为Emby或Jellyfin
+            if selected_config.type not in ['emby', 'jellyfin']:
+                logger.error(f"选中的媒体库类型不支持: {selected_config.type}")
+                return
+            
+            # 从配置中提取服务器信息
+            config_data = selected_config.config or {}
+            self._emby_host = config_data.get('host', '')
+            self._emby_api_key = config_data.get('api_key', '')
+            
+            if self._emby_host and self._emby_api_key:
+                logger.info(f"成功从媒体库配置获取Emby信息: {self._emby_host}")
+            else:
+                logger.warning(f"媒体库配置中缺少必要的Emby信息: host={bool(self._emby_host)}, api_key={bool(self._emby_api_key)}")
+                
+        except Exception as e:
+            logger.error(f"从媒体库配置获取Emby信息失败: {str(e)}")
+
+    def _get_available_mediaservers(self):
+        """获取可用的媒体库服务器列表"""
+        try:
+            mediaserver_configs = ServiceConfigHelper.get_mediaserver_configs()
+            available_servers = []
+            
+            for config in mediaserver_configs:
+                if config.enabled and config.type in ['emby', 'jellyfin']:
+                    available_servers.append({
+                        'name': config.name,
+                        'type': config.type,
+                        'host': config.config.get('host', '') if config.config else ''
+                    })
+            
+            return available_servers
+            
+        except Exception as e:
+            logger.error(f"获取可用媒体库服务器失败: {str(e)}")
+            return []
+
+    def _load_emby_libraries(self):
+        """加载Emby媒体库信息"""
+        try:
+            if not self._emby_host or not self._emby_api_key:
+                logger.warning("Emby服务器地址或API密钥未配置，跳过媒体库加载")
+                return
+            
+            url = f"{self._emby_host}/Library/MediaFolders"
+            params = {"api_key": self._emby_api_key}
+            
+            import requests
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                self._emby_libraries = [
+                    EmbyLibraryInfo(
+                        Id=lib.get("Id", ""),
+                        Name=lib.get("Name", ""),
+                        CollectionType=lib.get("CollectionType"),
+                        Locations=lib.get("Locations", [])
+                    ) for lib in data.get("Items", [])
+                ]
+                logger.info(f"成功加载 {len(self._emby_libraries)} 个Emby媒体库")
+            else:
+                logger.error(f"获取Emby媒体库失败: HTTP {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"加载Emby媒体库信息失败: {str(e)}")
+
+    def _find_target_library(self, file_path: str) -> Optional[EmbyLibraryInfo]:
+        """查找包含指定路径的媒体库"""
+        try:
+            file_path = Path(file_path).as_posix()
+            
+            # 首先尝试传统的Locations匹配
+            for library in self._emby_libraries:
+                if library.Locations:
+                    for location in library.Locations:
+                        location_path = Path(location).as_posix()
+                        if file_path.startswith(location_path):
+                            logger.info(f"通过Locations匹配到媒体库: {library.Name}")
+                            return library
+            
+            # 如果所有媒体库Locations都为空，使用路径特征匹配
+            logger.info("所有媒体库Locations为空，尝试路径特征匹配")
+            
+            # 提取路径中的关键信息用于匹配
+            path_parts = [part for part in file_path.split("/") if part]
+            directory_parts = path_parts[:-1] if len(path_parts) > 1 else path_parts
+            
+            # 查找最佳匹配的媒体库
+            library_scores = {}
+            for library in self._emby_libraries:
+                score = 0
+                for i, part in enumerate(directory_parts):
+                    if part and self._path_similarity_match(part, library.Name):
+                        weight = (i + 1) * 2
+                        score += weight
+                
+                if score > 0:
+                    library_scores[library.Name] = {"score": score, "library": library}
+            
+            # 选择得分最高的
+            if library_scores:
+                best_match = max(library_scores.items(), key=lambda x: x[1]["score"])
+                best_library = best_match[1]["library"]
+                logger.info(f"最佳匹配媒体库: {best_library.Name} (得分: {best_match[1]['score']})")
+                return best_library
+            
+            # 如果没有匹配，返回第一个可用的媒体库
+            if self._emby_libraries:
+                default_library = self._emby_libraries[0]
+                logger.warning(f"无法找到匹配的媒体库，使用默认媒体库: {default_library.Name}")
+                return default_library
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"查找目标媒体库失败: {str(e)}")
+            return None
+
+    def _path_similarity_match(self, path_part: str, library_name: str) -> bool:
+        """基于媒体库名称的路径匹配算法"""
+        try:
+            path_part_lower = path_part.lower()
+            library_name_lower = library_name.lower()
+            
+            # 基于实际媒体库名称的关键词映射
+            library_keywords = {
+                "华语电影": ["华语电影", "华语", "中文电影", "国产电影", "中国电影"],
+                "外语电影": ["外语电影", "外语", "欧美电影", "美国电影", "英语电影", "好莱坞"],
+                "动画电影": ["动画电影", "动画", "动漫电影"],
+                "国产剧集": ["国产剧", "华语剧", "中文剧", "国剧"],
+                "欧美剧集": ["欧美剧", "美剧", "英剧", "美国剧"],
+                "日韩剧集": ["日剧", "韩剧", "日本剧", "韩国剧", "日韩剧"],
+                "国产动漫": ["国产动漫", "国漫", "中国动漫"],
+                "日本动漫": ["日本动漫", "日漫", "日番"],
+                "纪录片集": ["纪录片", "纪录", "documentary"],
+                "综艺节目": ["综艺", "variety"],
+                "儿童节目": ["儿童", "少儿", "kids"],
+                "音悦世界": ["音乐", "music", "音悦"],
+                "短剧合集": ["短剧", "短片"],
+                "全球影视": ["全球", "国际"],
+                "合集": ["合集", "collection"],
+            }
+            
+            # 检查是否有对应该媒体库的关键词
+            if library_name in library_keywords:
+                keywords = library_keywords[library_name]
+                for keyword in keywords:
+                    if keyword in path_part_lower:
+                        return True
+            
+            # 检查媒体库名称的各个部分是否出现在路径中
+            library_parts = [part for part in library_name_lower.replace("-", "").replace("_", "") if part]
+            for lib_part in library_parts:
+                if len(lib_part) >= 2 and lib_part in path_part_lower:
+                    return True
+            
+            # 检查路径部分是否直接包含在媒体库名称中
+            if len(path_part) >= 2 and path_part_lower in library_name_lower:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"路径相似性匹配失败: {str(e)}")
+            return False
+
+    def _refresh_emby_library_direct(self, file_path: str) -> bool:
+        """直接调用Emby API刷新媒体库"""
+        try:
+            if not self._emby_host or not self._emby_api_key:
+                logger.warning("Emby服务器地址或API密钥未配置，跳过直接API调用")
+                return False
+            
+            # 查找包含该路径的媒体库
+            target_library = self._find_target_library(file_path)
+            if not target_library:
+                logger.warning(f"未找到包含路径的媒体库: {file_path}")
+                return False
+            
+            # 调用Emby部分扫描API
+            scan_url = f"{self._emby_host}/Library/Refresh"
+            params = {
+                "api_key": self._emby_api_key,
+                "Ids": target_library.Id,
+                "path": file_path,
+            }
+            
+            import requests
+            response = requests.post(scan_url, params=params, timeout=30)
+            
+            if response.status_code == 204:
+                logger.info(f"✅ Emby扫描请求成功: {target_library.Name} - {file_path}")
+                return True
+            else:
+                logger.error(f"❌ Emby扫描请求失败: HTTP {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"直接调用Emby API失败: {str(e)}")
+            return False
 
     def _sync_file_to_targets(self, source_file_path: str, sync_targets: list[str]) -> dict:
         """
