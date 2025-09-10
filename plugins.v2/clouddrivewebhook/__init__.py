@@ -49,7 +49,7 @@ class CloudDriveWebhook(_PluginBase):
     plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步和自动从MoviePilot媒体库配置获取Emby信息进行刷新"
     plugin_icon = "clouddrive.png"
     plugin_color = "#00BFFF"
-    plugin_version = "2.5"
+    plugin_version = "2.6"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "clouddrivewebhook"
@@ -116,7 +116,7 @@ class CloudDriveWebhook(_PluginBase):
                 "endpoint": self.clouddrive_webhook,
                 "methods": ["POST"],
                 "summary": "CloudDrive目录刷新Webhook",
-                "description": "接收JSON格式的文件列表，通过gRPC直接刷新文件所在的上一级目录。支持批量处理多个文件路径。"
+                "description": "接收JSON格式的文件列表，只处理action为'create'的数据，通过gRPC直接刷新文件所在的上一级目录。支持批量处理多个文件路径。"
             },
             {
                 "path": "/test_connection",
@@ -659,7 +659,7 @@ class CloudDriveWebhook(_PluginBase):
         CloudDrive目录刷新Webhook
         
         Args:
-            request_data: 请求数据，包含data数组，每个元素有source_file字段；支持path_type参数："mapping"(默认)/"source"
+            request_data: 请求数据，包含data数组，每个元素有action和source_file字段；只处理action为"create"的数据；支持path_type参数："mapping"(默认)/"source"
             apikey: API密钥（通过query参数或X-API-KEY头传递）
             
         Returns:
@@ -690,30 +690,36 @@ class CloudDriveWebhook(_PluginBase):
                 source_directories: set[str] = set()
                 failed_files = []
 
-                for i, item in enumerate(data):
-                    try:
-                        source_file = item.get("source_file", "")
-                        if not source_file:
-                            logger.warning(f"第 {i+1} 个文件缺少source_file字段: {item}")
-                            failed_files.append({"index": i, "reason": "missing_source_file"})
-                            continue
+            for i, item in enumerate(data):
+                try:
+                    # 检查action字段，只处理create操作
+                    action = item.get("action", "")
+                    if action != "create":
+                        logger.info(f"第 {i+1} 个文件action不是create，跳过处理: {action}")
+                        continue
+                    
+                    source_file = item.get("source_file", "")
+                    if not source_file:
+                        logger.warning(f"第 {i+1} 个文件缺少source_file字段: {item}")
+                        failed_files.append({"index": i, "reason": "missing_source_file"})
+                        continue
 
-                        logger.info(f"源模式处理第 {i+1} 个文件: {source_file}")
+                    logger.info(f"源模式处理第 {i+1} 个文件: {source_file}")
 
-                        # 获取文件父目录
-                        file_parent = str(Path(source_file).parent)
+                    # 获取文件父目录
+                    file_parent = str(Path(source_file).parent)
+                    
+                    # 构建从根目录到父目录的逐级目录列表
+                    source_levels = self._build_source_hierarchy(file_parent)
+                    
+                    # 将每个源目录添加到刷新集合
+                    for src_dir in source_levels:
+                        source_directories.add(src_dir.rstrip('/'))
+                        logger.info(f"加入源模式刷新: {src_dir}")
                         
-                        # 构建从根目录到父目录的逐级目录列表
-                        source_levels = self._build_source_hierarchy(file_parent)
-                        
-                        # 将每个源目录添加到刷新集合
-                        for src_dir in source_levels:
-                            source_directories.add(src_dir.rstrip('/'))
-                            logger.info(f"加入源模式刷新: {src_dir}")
-                            
-                    except Exception as e:
-                        logger.error(f"处理源路径目录时发生错误: {str(e)}")
-                        failed_files.append({"index": i, "reason": "processing_error", "error": str(e)})
+                except Exception as e:
+                    logger.error(f"处理源路径目录时发生错误: {str(e)}")
+                    failed_files.append({"index": i, "reason": "processing_error", "error": str(e)})
 
                 # source模式：直接刷新所有源目录，不进行合并
                 for directory in sorted(list(source_directories)):
@@ -743,6 +749,13 @@ class CloudDriveWebhook(_PluginBase):
             
             for i, item in enumerate(data):
                 try:
+                    # 检查action字段，只处理create操作
+                    action = item.get("action", "")
+                    if action != "create":
+                        logger.info(f"第 {i+1} 个文件action不是create，跳过处理: {action}")
+                        skipped_files.append({"index": i, "reason": f"action_not_create: {action}"})
+                        continue
+                    
                     # 获取source_file字段
                     source_file = item.get("source_file", "")
                     if not source_file:
