@@ -1875,6 +1875,9 @@ class QbOptimizer(_PluginBase):
                 torrent_info=torrent_info
             )
             
+            # 标记绕过下载器负载均衡，避免与负载均衡插件冲突
+            setattr(context, "_bypass_downloader_balancer", True)
+            
             # 获取下载目录（使用原始种子的保存路径）
             save_path = original_torrent_info.get('save_path', '')
             if save_path:

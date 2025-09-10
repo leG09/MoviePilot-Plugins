@@ -66,10 +66,8 @@ class DownloaderBalancer(_PluginBase):
         # 动态注册作为兜底
         if self._enabled and self._override_downloader:
             try:
-                # 同步事件
+                # 只注册一次事件，避免重复处理
                 eventmanager.register(ChainEventType.ResourceDownload, self._handle_resource_download)
-                # 兼容订阅完成/添加钩子（用于验证日志或后续扩展）
-                eventmanager.register(EventType.ResourceDownload, self._handle_resource_download)
             except Exception as _:
                 pass
 
@@ -357,6 +355,17 @@ class DownloaderBalancer(_PluginBase):
                     setattr(dc_self, "_last_context", context)
                 except Exception:
                     pass
+                
+                # 检查是否已经被事件处理器处理过
+                if context and hasattr(context, "_downloader_balancer_processed"):
+                    logger.info("DownloaderBalancer: 下载器已被事件处理器选择，跳过补丁处理")
+                    return plugin._orig_download_single(dc_self, *args, **kwargs)
+                
+                # 检查是否被标记为绕过负载均衡（用于其他插件的重新下载功能）
+                if context and hasattr(context, "_bypass_downloader_balancer"):
+                    logger.info("DownloaderBalancer: 检测到绕过标记，跳过负载均衡选择")
+                    return plugin._orig_download_single(dc_self, *args, **kwargs)
+                
                 selected = None
                 if context and getattr(context, "torrent_info", None) and getattr(context, "media_info", None):
                     ctx = {
@@ -375,6 +384,8 @@ class DownloaderBalancer(_PluginBase):
                     try:
                         if context and getattr(context, "torrent_info", None):
                             setattr(context.torrent_info, "site_downloader", selected)
+                            # 标记已处理，避免事件处理器重复处理
+                            setattr(context, "_downloader_balancer_processed", True)
                     except Exception:
                         pass
                     kwargs["downloader"] = selected
@@ -827,6 +838,12 @@ class DownloaderBalancer(_PluginBase):
             
             event_data: ResourceDownloadEventData = event.event_data
             
+            # 检查是否已经被补丁处理器处理过
+            if (hasattr(event_data, "context") and event_data.context and 
+                hasattr(event_data.context, "_downloader_balancer_processed")):
+                logger.info("DownloaderBalancer: 下载器已被补丁处理器选择，跳过事件处理")
+                return
+            
             # 构建选择上下文
             context = {
                 "filename": event_data.context.torrent_info.title,
@@ -856,6 +873,8 @@ class DownloaderBalancer(_PluginBase):
                         hasattr(event_data.context, "torrent_info") and event_data.context.torrent_info
                     ):
                         setattr(event_data.context.torrent_info, "site_downloader", selected_downloader)
+                        # 标记已处理，避免补丁处理器重复处理
+                        setattr(event_data.context, "_downloader_balancer_processed", True)
                         # 同步覆盖 DownloadChain.call 参数场景：设置 options 里的 downloder/save_path
                         if not event_data.options:
                             event_data.options = {}
@@ -874,9 +893,8 @@ class DownloaderBalancer(_PluginBase):
         except Exception as e:
             logger.error(f"处理资源下载事件时发生错误: {e}")
 
-    # 使用装饰器确保事件注册一定生效
-    @eventmanager.register(ChainEventType.ResourceDownload)
     def on_resource_download(self, event: Event):
+        """事件处理器（已通过手动注册）"""
         try:
             return self._handle_resource_download(event)
         except Exception as e:
