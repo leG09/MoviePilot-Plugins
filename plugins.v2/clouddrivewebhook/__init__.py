@@ -49,7 +49,7 @@ class CloudDriveWebhook(_PluginBase):
     plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步和自动从MoviePilot媒体库配置获取Emby信息进行刷新"
     plugin_icon = "clouddrive.png"
     plugin_color = "#00BFFF"
-    plugin_version = "2.7"
+    plugin_version = "2.8"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "clouddrivewebhook"
@@ -1553,41 +1553,58 @@ class CloudDriveWebhook(_PluginBase):
     def _refresh_parent_chain(self, directory_path: str) -> None:
         """
         逐级刷新父级目录链，从映射前缀一路刷新到指定目录的上级目录。
-        仅做尽力而为的容错，不抛异常。
+        确保从前往后逐级刷新，避免跳过中间目录。
         """
         try:
             if not directory_path:
                 return
+            
+            logger.info(f"开始刷新父级目录链: {directory_path}")
+            
             # 找到映射前缀（目标前缀）
             target_prefix = self._get_target_path_prefix(directory_path)
             if not target_prefix:
                 logger.warning(f"无法确定目标路径前缀，跳过父级链刷新: {directory_path}")
                 return
-            dir_parent = str(Path(directory_path).parent)
-            if not dir_parent or dir_parent == ".":
+            
+            # 获取目标目录的父目录
+            target_parent = str(Path(directory_path).parent)
+            if not target_parent or target_parent == ".":
+                logger.info(f"目标目录没有父目录，跳过父级链刷新")
                 return
-            # 构建从前缀到父目录的层级
-            try:
-                parts = Path(dir_parent).parts
-                prefix_parts = Path(target_prefix).parts
-                start = None
-                for i in range(len(parts) - len(prefix_parts) + 1):
-                    if parts[i:i+len(prefix_parts)] == prefix_parts:
-                        start = i
-                        break
-                if start is None:
-                    logger.warning(f"父级链中未找到前缀: {target_prefix} in {dir_parent}")
-                    return
-                # 逐级刷新
-                current = target_prefix
-                self._refresh_directory_via_grpc(current)
-                for j in range(start + len(prefix_parts), len(parts)):
-                    current = f"{current}/{parts[j]}"
-                    self._refresh_directory_via_grpc(current)
-            except Exception as e:
-                logger.warning(f"构建/刷新父级链失败: {str(e)}")
-        except Exception:
-            pass
+            
+            logger.info(f"目标前缀: {target_prefix}")
+            logger.info(f"目标父目录: {target_parent}")
+            
+            # 构建从目标前缀到目标父目录的完整层级路径
+            hierarchy_paths = self._build_hierarchy_from_prefix(target_parent, target_prefix)
+            
+            if not hierarchy_paths:
+                logger.warning(f"无法构建目录层级，跳过父级链刷新")
+                return
+            
+            logger.info(f"需要刷新的目录层级: {hierarchy_paths}")
+            
+            # 从前往后逐级刷新每个目录
+            for i, path in enumerate(hierarchy_paths):
+                try:
+                    logger.info(f"刷新第 {i+1}/{len(hierarchy_paths)} 级目录: {path}")
+                    result = self._refresh_directory_via_grpc(path)
+                    if result.get("success"):
+                        logger.info(f"✓ 目录刷新成功: {path}")
+                    else:
+                        logger.warning(f"✗ 目录刷新失败: {path} - {result.get('message', 'Unknown error')}")
+                        # 即使某个目录刷新失败，也继续刷新后续目录
+                except Exception as e:
+                    logger.warning(f"刷新目录 {path} 时发生异常: {str(e)}")
+                    # 继续刷新后续目录
+            
+            logger.info(f"父级目录链刷新完成")
+            
+        except Exception as e:
+            logger.error(f"刷新父级目录链时发生错误: {str(e)}")
+            import traceback
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
 
     def _get_source_path_prefix(self, source_path: str) -> str:
         """
@@ -1724,16 +1741,23 @@ class CloudDriveWebhook(_PluginBase):
                     continue
                 
                 try:
-                    source_path, target_path = line.split('=>', 1)
+                    source_path, targets = line.split('=>', 1)
                     source_path = source_path.strip()
-                    target_path = target_path.strip()
+                    targets = targets.strip()
                     
-                    logger.info(f"检查映射规则: {source_path} => {target_path}")
+                    # 分割目标路径，第一个是主目标
+                    target_parts = [part.strip() for part in targets.split(':') if part.strip()]
+                    if not target_parts:
+                        continue
+                    
+                    main_target = target_parts[0]
+                    
+                    logger.info(f"检查映射规则: {source_path} => {main_target}")
                     
                     # 检查文件路径是否匹配这个目标路径
-                    if file_path.startswith(target_path):
-                        logger.info(f"找到匹配的目标路径: {target_path}")
-                        return target_path
+                    if file_path.startswith(main_target):
+                        logger.info(f"找到匹配的目标路径: {main_target}")
+                        return main_target
                         
                 except Exception as e:
                     logger.warning(f"解析路径映射失败: {line}, 错误: {str(e)}")
