@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.2" 
+    plugin_version = "3.0.3" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -215,24 +215,28 @@ class GDCloudLinkMonitor(_PluginBase):
     def _load_ai_keys_state(self):
         try:
             if not self._ai_keys_file or not self._ai_keys_file.exists():
-                return []
+                return [], 0
             with open(self._ai_keys_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 keys = data.get('keys') if isinstance(data, dict) else None
+                current_index = data.get('current_index', 0) if isinstance(data, dict) else 0
                 if isinstance(keys, list):
-                    return [k for k in keys if isinstance(k, str) and k]
+                    return [k for k in keys if isinstance(k, str) and k], current_index
                 if isinstance(data, list):
-                    return [k for k in data if isinstance(k, str) and k]
+                    return [k for k in data if isinstance(k, str) and k], 0
         except Exception as e:
             logger.debug(f"加载AI密钥记录失败：{e}")
-        return []
+        return [], 0
 
     def _save_ai_keys_state(self, keys: List[str]):
         try:
             if not self._ai_keys_file:
                 return
             with open(self._ai_keys_file, 'w', encoding='utf-8') as f:
-                json.dump({'keys': keys}, f, ensure_ascii=False, indent=2)
+                json.dump({
+                    'keys': keys,
+                    'current_index': self._ai_key_index
+                }, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.debug(f"保存AI密钥记录失败：{e}")
 
@@ -790,7 +794,7 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._ai_key_index = 0
             active_key = self._ai_api_keys[self._ai_key_index]
             params = {"key": active_key}
-            logger.info("调用AI重命名接口")
+            logger.info(f"调用AI重命名接口，使用密钥索引: {self._ai_key_index}/{len(self._ai_api_keys)-1}")
             resp = requests.post(url, headers=headers, params=params, json=payload, timeout=self._ai_timeout)
             if resp.status_code != 200:
                 try:
@@ -798,12 +802,22 @@ class GDCloudLinkMonitor(_PluginBase):
                 except Exception:
                     pass
                 logger.warning(f"AI接口返回状态码异常: {resp.status_code}")
-                # 401/403/400等认为可能Key失效，尝试自动切换
-                if self._ai_api_keys and resp.status_code in (400, 401, 403):
+                # 400/401/403/429等认为可能Key失效或配额超限，尝试自动切换
+                if self._ai_api_keys and resp.status_code in (400, 401, 403, 429):
                     prev = self._ai_key_index
                     self._ai_key_index = (self._ai_key_index + 1) % len(self._ai_api_keys)
                     if self._ai_key_index != prev:
-                        logger.info(f"AI密钥可能失效，自动切换至索引 {self._ai_key_index}")
+                        if resp.status_code == 429:
+                            logger.info(f"AI密钥配额超限，自动切换至索引 {self._ai_key_index}")
+                        else:
+                            logger.info(f"AI密钥可能失效，自动切换至索引 {self._ai_key_index}")
+                        # 保存新的密钥索引状态
+                        self._save_ai_keys_state(self._ai_api_keys)
+                    else:
+                        if resp.status_code == 429:
+                            logger.warning("所有AI密钥都已达到配额限制")
+                        else:
+                            logger.warning("所有AI密钥都已失效")
                 return None
             data = resp.json()
             # 解析Gemini输出
@@ -958,8 +972,8 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._save_ai_keys_state(self._ai_api_keys)
             else:
                 # 未提供字段：沿用持久化文件中的密钥
-                self._ai_api_keys = self._load_ai_keys_state()
-            self._ai_key_index = 0 if self._ai_api_keys else -1
+                self._ai_api_keys, saved_index = self._load_ai_keys_state()
+                self._ai_key_index = saved_index if self._ai_api_keys else -1
             self._ai_timeout = config.get("ai_timeout", 30)
             self._ai_cache_days = config.get("ai_cache_days", 5)
 
