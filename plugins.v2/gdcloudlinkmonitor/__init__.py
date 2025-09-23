@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.3" 
+    plugin_version = "3.0.4" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -147,18 +147,12 @@ class GDCloudLinkMonitor(_PluginBase):
     _ai_timeout = 30
     _ai_cache_days = 5  # AI识别记录缓存天数
     _ai_prompt_template = (
-        "请根据文件夹内的所有文件名，将文件夹重命名为标准命名：\n"
-        "- 输入：文件夹内所有文件的完整路径列表\n"
-        "- 输出：严格JSON，仅包含字段 directory_name(新的目录名)\n"
-        "- 规则：\n"
-        "  1) 分析文件夹内所有文件名，提取共同信息(标题、年份、季数等)；\n"
-        "  2) 若为剧集(电视/动漫)，目录名必须包含完整的季集范围，如 S01E01-E10 或 S01E01-E12；\n"
-        "  3) 若为电影，目录名不要包含季集信息；\n"
-        "  4) 若原始文件名包含中文，请保留中文标题，不要翻译；仅分辨率/编码/音频/发布组等技术信息使用英文；\n"
-        "  5) 若原始文件名不含中文，则标题用英文；\n"
-        "  6) 应尽量包含：标题、年份、分辨率、视频编码、音频信息、发布组；\n"
-        "  7) 目录名应能代表整个文件夹的内容；\n"
-        "  8) 对于剧集，必须分析所有文件的季集号，生成完整的季集范围。\n"
+        "基于文件夹内所有媒体文件名，生成规范化目录名。\n"
+        "输入：该文件夹内所有文件的完整路径列表。\n"
+        "输出：仅返回严格JSON：{\"directory_name\":\"...\"}，不要额外文本/解释/代码块。\n"
+        "规则：1) 剧集目录名须含完整季集范围(如 S01E01-E10)；2) 电影目录名不可含季集信息；\n"
+        "3) 标题保留原文件名中的中文；若无中文则用英文；技术信息(分辨率/编码/音频/发布组)用英文；\n"
+        "4) 尽量包含：标题、年份、分辨率、视频编码、音频、发布组；5) 需能代表整季/整片内容。\n"
         "示例(剧集)：{\"directory_name\":\"孤注一掷：托特纳姆热刺.S01E01-E10.1080p.WEB-DL.H265.DDP5.1-GROUP\"}\n"
         "示例(电影)：{\"directory_name\":\"无名之辈：否极泰来.2025.1080p.WEB-DL.H265.DDP5.1-GROUP\"}"
     )
@@ -771,9 +765,16 @@ class GDCloudLinkMonitor(_PluginBase):
                 logger.warning(f"目录内没有找到媒体文件：{directory_path}")
                 return None
                 
-            # 构建文件列表字符串
-            file_paths_text = "\n".join([str(f) for f in file_list])
-            prompt = f"{self._ai_prompt_template}\n文件夹路径：{directory_path}\n文件夹内所有文件：\n{file_paths_text}"
+            # 构建精简的文件列表：仅文件名、限制数量，减少token
+            max_files = 60
+            file_names = [Path(f).name for f in file_list[:max_files]]
+            file_paths_text = "\n".join(file_names)
+            if len(file_list) > max_files:
+                file_paths_text += f"\n... (共{len(file_list)}个，仅展示前{max_files}个)"
+
+            # 仅传目录名，避免冗长绝对路径
+            dir_name_only = Path(directory_path).name
+            prompt = f"{self._ai_prompt_template}\n目录名：{dir_name_only}\n文件：\n{file_paths_text}"
             
             payload = {
                 "contents": [
