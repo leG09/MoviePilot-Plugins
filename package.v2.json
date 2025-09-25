@@ -30,31 +30,6 @@
       "v2.8.1": "修复路径匹配问题，添加挂载路径映射配置"
     }
   },
-  "XGMediaServerRefresh": {
-    "name": "媒体库服务器刷新",
-    "description": "入库后自动刷新Emby/Jellyfin/Plex服务器海报墙。",
-    "labels": "媒体库",
-    "version": "1.4.1",
-    "icon": "refresh2.png",
-    "author": "leGO9",
-    "level": 1,
-    "history": {
-      "v1.4.1":"增加目录映射",
-      "v1.3.3": "优化延迟刷新"
-    }
-  },
-  "WebhookEmby": {
-    "name": "Emby入库Webhook",
-    "description": "通过Webhook接收文件路径并触发刮削和入库通知，适用于文件已在正确位置的场景。",
-    "labels": "媒体库,Webhook",
-    "version": "1.0",
-    "icon": "Emby_A.png",
-    "author": "leGO9",
-    "level": 1,
-    "history": {
-      "v1.0": "首个版本，实现Emby入库Webhook功能"
-    }
-  },
   "CloudDriveWebhook": {
     "name": "CloudDrive目录刷新Webhook",
     "description": "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持路径映射、请求合并、登录缓存和智能通知。",
