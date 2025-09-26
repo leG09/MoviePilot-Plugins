@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.5" 
+    plugin_version = "3.0.6" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -138,6 +138,7 @@ class GDCloudLinkMonitor(_PluginBase):
     _refresh_api_key = ""  # 刷新API密钥
     
     # AI 规范命名相关属性
+    _ai_provider = "gemini"  # 可选：gemini/openai/grok
     _ai_rename_enabled = False
     _ai_api_url = ""
     _ai_model = "gemini-2.0-flash"
@@ -776,69 +777,124 @@ class GDCloudLinkMonitor(_PluginBase):
             dir_name_only = Path(directory_path).name
             prompt = f"{self._ai_prompt_template}\n目录名：{dir_name_only}\n文件：\n{file_paths_text}"
             
-            payload = {
-                "contents": [
-                    {"parts": [{"text": prompt}]}
-                ],
-                # 提示服务端按JSON返回
-                "generationConfig": {
-                    "response_mime_type": "application/json"
-                }
-            }
-            headers = {
-                "Content-Type": "application/json"
-            }
-            # 兼容用户自定义URL：优先使用配置的完整URL；key通过查询参数传递
-            url = self._ai_api_url or f"https://generativelanguage.googleapis.com/v1beta/models/{self._ai_model}:generateContent"
             # 轮换Key：若多Key存在，按索引取用
             if self._ai_key_index < 0 or self._ai_key_index >= len(self._ai_api_keys):
                 self._ai_key_index = 0
             active_key = self._ai_api_keys[self._ai_key_index]
-            params = {"key": active_key}
-            logger.info(f"调用AI重命名接口，使用密钥索引: {self._ai_key_index}/{len(self._ai_api_keys)-1}")
-            resp = requests.post(url, headers=headers, params=params, json=payload, timeout=self._ai_timeout)
-            if resp.status_code != 200:
+
+            provider = (self._ai_provider or "gemini").lower()
+
+            if provider == "gemini":
+                payload = {
+                    "contents": [
+                        {"parts": [{"text": prompt}]}
+                    ],
+                    "generationConfig": {
+                        "response_mime_type": "application/json"
+                    }
+                }
+                headers = {
+                    "Content-Type": "application/json"
+                }
+                url = self._ai_api_url or f"https://generativelanguage.googleapis.com/v1beta/models/{self._ai_model}:generateContent"
+                params = {"key": active_key}
+                logger.info(f"调用AI重命名接口(Gemini)，使用密钥索引: {self._ai_key_index}/{len(self._ai_api_keys)-1}")
+                resp = requests.post(url, headers=headers, params=params, json=payload, timeout=self._ai_timeout)
+                if resp.status_code != 200:
+                    try:
+                        logger.info(f"AI响应体: {resp.text}")
+                    except Exception:
+                        pass
+                    logger.warning(f"AI接口返回状态码异常: {resp.status_code}")
+                    if self._ai_api_keys and resp.status_code in (400, 401, 403, 429):
+                        prev = self._ai_key_index
+                        self._ai_key_index = (self._ai_key_index + 1) % len(self._ai_api_keys)
+                        if self._ai_key_index != prev:
+                            if resp.status_code == 429:
+                                logger.info(f"AI密钥配额超限，自动切换至索引 {self._ai_key_index}")
+                            else:
+                                logger.info(f"AI密钥可能失效，自动切换至索引 {self._ai_key_index}")
+                            self._save_ai_keys_state(self._ai_api_keys)
+                        else:
+                            if resp.status_code == 429:
+                                logger.warning("所有AI密钥都已达到配额限制")
+                            else:
+                                logger.warning("所有AI密钥都已失效")
+                    return None
+                data = resp.json()
+                # 解析Gemini输出
+                text = None
                 try:
-                    logger.info(f"AI响应体: {resp.text}")
+                    candidates = data.get("candidates") or []
+                    for c in candidates:
+                        content = c.get("content") or {}
+                        parts = content.get("parts") or []
+                        for p in parts:
+                            if isinstance(p, dict) and p.get("text"):
+                                text = p.get("text")
+                                break
+                        if text:
+                            break
                 except Exception:
                     pass
-                logger.warning(f"AI接口返回状态码异常: {resp.status_code}")
-                # 400/401/403/429等认为可能Key失效或配额超限，尝试自动切换
-                if self._ai_api_keys and resp.status_code in (400, 401, 403, 429):
-                    prev = self._ai_key_index
-                    self._ai_key_index = (self._ai_key_index + 1) % len(self._ai_api_keys)
-                    if self._ai_key_index != prev:
-                        if resp.status_code == 429:
-                            logger.info(f"AI密钥配额超限，自动切换至索引 {self._ai_key_index}")
+                if not text:
+                    text = json.dumps(data)
+            else:
+                # OpenAI/Grok（OpenAI兼容）
+                base_url = self._ai_api_url
+                if not base_url:
+                    base_url = "https://api.openai.com/v1/chat/completions" if provider == "openai" else "https://api.x.ai/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {active_key}"
+                }
+                model = self._ai_model or ("gpt-4o-mini" if provider == "openai" else "grok-2-latest")
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "你是一个媒体目录命名助手。严格返回JSON对象，不要额外文字。"
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    "response_format": {"type": "json_object"}
+                }
+                logger.info(f"调用AI重命名接口({provider})，使用密钥索引: {self._ai_key_index}/{len(self._ai_api_keys)-1}")
+                resp = requests.post(base_url, headers=headers, json=payload, timeout=self._ai_timeout)
+                if resp.status_code != 200:
+                    try:
+                        logger.info(f"AI响应体: {resp.text}")
+                    except Exception:
+                        pass
+                    logger.warning(f"AI接口返回状态码异常: {resp.status_code}")
+                    if self._ai_api_keys and resp.status_code in (400, 401, 403, 429):
+                        prev = self._ai_key_index
+                        self._ai_key_index = (self._ai_key_index + 1) % len(self._ai_api_keys)
+                        if self._ai_key_index != prev:
+                            if resp.status_code == 429:
+                                logger.info(f"AI密钥配额超限，自动切换至索引 {self._ai_key_index}")
+                            else:
+                                logger.info(f"AI密钥可能失效，自动切换至索引 {self._ai_key_index}")
+                            self._save_ai_keys_state(self._ai_api_keys)
                         else:
-                            logger.info(f"AI密钥可能失效，自动切换至索引 {self._ai_key_index}")
-                        # 保存新的密钥索引状态
-                        self._save_ai_keys_state(self._ai_api_keys)
-                    else:
-                        if resp.status_code == 429:
-                            logger.warning("所有AI密钥都已达到配额限制")
-                        else:
-                            logger.warning("所有AI密钥都已失效")
-                return None
-            data = resp.json()
-            # 解析Gemini输出
-            text = None
-            try:
-                candidates = data.get("candidates") or []
-                for c in candidates:
-                    content = c.get("content") or {}
-                    parts = content.get("parts") or []
-                    for p in parts:
-                        if isinstance(p, dict) and p.get("text"):
-                            text = p.get("text")
-                            break
-                    if text:
-                        break
-            except Exception:
-                pass
-            if not text:
-                # 兼容直接返回JSON
-                text = json.dumps(data)
+                            if resp.status_code == 429:
+                                logger.warning("所有AI密钥都已达到配额限制")
+                            else:
+                                logger.warning("所有AI密钥都已失效")
+                    return None
+                data = resp.json()
+                # 解析OpenAI兼容输出
+                text = None
+                try:
+                    choices = data.get("choices") or []
+                    if choices:
+                        message = choices[0].get("message") or {}
+                        text = message.get("content")
+                except Exception:
+                    pass
+                if not text:
+                    text = json.dumps(data)
             # 去除```包裹
             if isinstance(text, str):
                 cleaned = text.strip()
@@ -962,6 +1018,7 @@ class GDCloudLinkMonitor(_PluginBase):
             self._refresh_api_key = config.get("refresh_api_key", "")
             
             # AI 规范命名配置（提示词为内置，不允许前端自定义）
+            self._ai_provider = (config.get("ai_provider") or "gemini").lower()
             self._ai_rename_enabled = config.get("ai_rename_enabled", False)
             self._ai_api_url = config.get("ai_api_url", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent")
             self._ai_model = config.get("ai_model", "gemini-2.0-flash")
@@ -1129,6 +1186,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "refresh_api_url": self._refresh_api_url,
             "refresh_api_key": self._refresh_api_key,
             # AI 规范命名
+            "ai_provider": self._ai_provider,
             "ai_rename_enabled": self._ai_rename_enabled,
             "ai_api_url": self._ai_api_url,
             "ai_model": self._ai_model,
@@ -1948,6 +2006,22 @@ class GDCloudLinkMonitor(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VSelect',
+                                    'props': {
+                                        'model': 'ai_provider',
+                                        'label': 'AI提供商',
+                                        'items': [
+                                            {'title': 'Gemini', 'value': 'gemini'},
+                                            {'title': 'OpenAI', 'value': 'openai'},
+                                            {'title': 'Grok', 'value': 'grok'}
+                                        ]
+                                    }
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {'component': 'VSwitch', 'props': {'model': 'ai_rename_enabled', 'label': '启用AI规范命名'}}]
                             },
@@ -2010,7 +2084,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
             "recovery_check_interval": 1800, "mount_path_mapping": "",
             "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
-            "ai_rename_enabled": False, "ai_api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+            "ai_provider": "gemini", "ai_rename_enabled": False, "ai_api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
             "ai_model": "gemini-2.0-flash", "ai_timeout": 30, "ai_cache_days": 5
         }
 
