@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.4" 
+    plugin_version = "3.0.5" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -1200,7 +1200,7 @@ class GDCloudLinkMonitor(_PluginBase):
                 transfer_history = self.transferhis.get_by_src(event_path)
                 if transfer_history:
                     logger.info("文件已处理过：%s" % event_path)
-                    # 触发AI规范命名
+                    # 触发AI规范命名 - 修复bug：只对媒体文件夹进行重命名，不对监控根目录重命名
                     try:
                         if not self._ai_rename_enabled:
                             logger.debug("AI规范命名未启用，跳过触发")
@@ -1208,12 +1208,37 @@ class GDCloudLinkMonitor(_PluginBase):
                             ep_path = Path(event_path)
                             dir_path = ep_path.parent
                             dir_key = str(dir_path)
+                            
+                            # 安全检查：防止重命名监控根目录
+                            if str(dir_path) == mon_path:
+                                logger.warning(f"AI重命名跳过：不能重命名监控根目录 {dir_path}")
+                                return
+                            
+                            # 检查是否为媒体文件夹（包含媒体文件的直接父目录）
+                            is_media_folder = False
+                            try:
+                                # 检查目录是否包含媒体文件
+                                media_files = SystemUtils.list_files(dir_path, settings.RMT_MEDIAEXT)
+                                if media_files:
+                                    # 检查是否所有媒体文件都在这个目录的直接子级
+                                    for media_file in media_files:
+                                        if Path(media_file).parent != dir_path:
+                                            break
+                                    else:
+                                        is_media_folder = True
+                            except Exception as e:
+                                logger.debug(f"检查媒体文件夹时出错: {e}")
+                            
+                            if not is_media_folder:
+                                logger.debug(f"AI重命名跳过：{dir_path} 不是媒体文件夹")
+                                return
+                            
                             if dir_key in self._ai_normalized_dirs:
                                 logger.info(f"目录已记录为已规范命名，跳过AI：{dir_key}")
                             elif dir_key in self._ai_processed_dirs:
                                 logger.info(f"目录本次运行已触发过AI，跳过重复调用：{dir_key}")
                             else:
-                                logger.info(f"准备触发AI规范命名，目录：{dir_key}")
+                                logger.info(f"准备触发AI规范命名，媒体文件夹：{dir_key}")
                                 ai_suggestion = self._call_ai_normalize_naming(str(dir_path))
                                 if ai_suggestion:
                                     # 执行文件夹重命名
@@ -1423,7 +1448,7 @@ class GDCloudLinkMonitor(_PluginBase):
                             text=f"原因：{transferinfo.message or '未知'}",
                             image=mediainfo.get_message_image()
                         )
-                    # 入库因同名冲突失败时触发AI规范命名
+                    # 入库因同名冲突失败时触发AI规范命名 - 修复bug：只对媒体文件夹进行重命名
                     try:
                         if self._ai_rename_enabled:
                             conflict = False
@@ -1434,18 +1459,38 @@ class GDCloudLinkMonitor(_PluginBase):
                                 ep_path = Path(event_path)
                                 dir_path = ep_path.parent
                                 dir_key = str(dir_path)
-                                if dir_key not in self._ai_processed_dirs and dir_key not in self._ai_normalized_dirs:
-                                    logger.info("检测到同名冲突，触发AI规范命名流程(失败分支)")
-                                    ai_suggestion = self._call_ai_normalize_naming(str(dir_path))
-                                    if ai_suggestion:
-                                        rename_ok = self._apply_ai_folder_renaming(directory_path=dir_path, suggestion=ai_suggestion)
-                                        if rename_ok:
-                                            self._ai_processed_dirs.add(dir_key)
-                                            self._ai_normalized_dirs.add(dir_key)
-                                            self._save_ai_normalized_state()
-                                            logger.info(f"AI文件夹重命名成功(失败分支)：{dir_path}")
-                                        else:
-                                            logger.warning(f"AI文件夹重命名失败(失败分支)：{dir_path}")
+                                
+                                # 安全检查：防止重命名监控根目录
+                                if str(dir_path) == mon_path:
+                                    logger.warning(f"AI重命名跳过(失败分支)：不能重命名监控根目录 {dir_path}")
+                                else:
+                                    # 检查是否为媒体文件夹
+                                    is_media_folder = False
+                                    try:
+                                        media_files = SystemUtils.list_files(dir_path, settings.RMT_MEDIAEXT)
+                                        if media_files:
+                                            for media_file in media_files:
+                                                if Path(media_file).parent != dir_path:
+                                                    break
+                                            else:
+                                                is_media_folder = True
+                                    except Exception as e:
+                                        logger.debug(f"检查媒体文件夹时出错(失败分支): {e}")
+                                    
+                                    if is_media_folder and dir_key not in self._ai_processed_dirs and dir_key not in self._ai_normalized_dirs:
+                                        logger.info("检测到同名冲突，触发AI规范命名流程(失败分支)")
+                                        ai_suggestion = self._call_ai_normalize_naming(str(dir_path))
+                                        if ai_suggestion:
+                                            rename_ok = self._apply_ai_folder_renaming(directory_path=dir_path, suggestion=ai_suggestion)
+                                            if rename_ok:
+                                                self._ai_processed_dirs.add(dir_key)
+                                                self._ai_normalized_dirs.add(dir_key)
+                                                self._save_ai_normalized_state()
+                                                logger.info(f"AI文件夹重命名成功(失败分支)：{dir_path}")
+                                            else:
+                                                logger.warning(f"AI文件夹重命名失败(失败分支)：{dir_path}")
+                                    elif not is_media_folder:
+                                        logger.debug(f"AI重命名跳过(失败分支)：{dir_path} 不是媒体文件夹")
                     except Exception as e:
                         logger.debug(f"AI重命名(失败分支)触发异常: {e}")
                     return
