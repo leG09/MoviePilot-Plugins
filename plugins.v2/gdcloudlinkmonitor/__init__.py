@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.6" 
+    plugin_version = "3.0.7" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -426,18 +426,36 @@ class GDCloudLinkMonitor(_PluginBase):
                         
         return matching_destinations
 
-    def _get_log_file_path(self, date: datetime.date = None) -> Path:
+    def _get_latest_log_file_path(self) -> Path:
         """
-        根据日期获取日志文件路径
+        获取日志目录中最新（按修改时间）的标准日期格式日志文件路径
+        只读取格式如 2025-10-16.log 的文件，排除 backup.2025-10-15.log 等备份文件
         """
         if not self._log_path:
             return None
-        
-        if date is None:
-            date = datetime.date.today()
             
-        log_filename = f"{date.strftime('%Y-%m-%d')}.log"
-        return Path(self._log_path) / log_filename
+        log_dir = Path(self._log_path)
+        if not log_dir.exists() or not log_dir.is_dir():
+            return None
+            
+        # 查找所有.log文件
+        all_log_files = list(log_dir.glob("*.log"))
+        if not all_log_files:
+            return None
+            
+        # 过滤出标准日期格式的日志文件（YYYY-MM-DD.log）
+        date_pattern = re.compile(r'^\d{4}-\d{2}-\d{2}\.log$')
+        log_files = [f for f in all_log_files if date_pattern.match(f.name)]
+        
+        if not log_files:
+            logger.debug(f"未找到标准日期格式的日志文件，跳过备份文件: {[f.name for f in all_log_files]}")
+            return None
+            
+        # 按文件修改时间排序，返回最新的文件
+        latest_file = max(log_files, key=lambda f: f.stat().st_mtime)
+        file_mtime = datetime.datetime.fromtimestamp(latest_file.stat().st_mtime)
+        logger.debug(f"选择最新的标准日志文件: {latest_file} (修改时间: {file_mtime})")
+        return latest_file
 
     def _check_cloud_errors(self) -> Dict[str, int]:
         """
@@ -448,14 +466,13 @@ class GDCloudLinkMonitor(_PluginBase):
         
         logger.debug(f"开始检查云盘错误，日志路径：{self._log_path}")
         
-        # 只检查今天的日志文件
-        date = datetime.date.today()
-        log_file = self._get_log_file_path(date)
+        # 获取最新的日志文件
+        log_file = self._get_latest_log_file_path()
         
-        logger.debug(f"检查今天的日志文件：{log_file}")
+        logger.debug(f"检查最新的日志文件：{log_file}")
             
         if not log_file:
-            logger.debug("日志文件路径为空，跳过")
+            logger.debug("未找到日志文件，跳过")
             return error_counts
                 
         if not log_file.exists():
