@@ -78,5 +78,17 @@
     "history": {
       "v1.0": "首个版本，实现文件清理功能"
     }
+  },
+  "RssPlugin": {
+    "name": "RSS订阅",
+    "description": "定时刷新RSS报文，识别内容后添加订阅或直接下载。",
+    "labels": "RSS,订阅",
+    "version": "1.0",
+    "icon": "rss.png",
+    "author": "leGO9",
+    "level": 1,
+    "history": {
+      "v1.0": "RSS下载过滤重复文件功能"
+    }
   }
 }
