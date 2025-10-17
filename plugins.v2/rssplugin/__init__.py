@@ -152,7 +152,7 @@ class RssPlugin(_PluginBase):
         """
         if self._enabled and self._cron:
             return [{
-                "id": "RssSubscribe",
+                "id": "RssPlugin",
                 "name": "自定义订阅服务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.check,
@@ -160,7 +160,7 @@ class RssPlugin(_PluginBase):
             }]
         elif self._enabled:
             return [{
-                "id": "RssSubscribe",
+                "id": "RssPlugin",
                 "name": "自定义订阅服务",
                 "trigger": "interval",
                 "func": self.check,
@@ -477,7 +477,7 @@ class RssPlugin(_PluginBase):
                             },
                             'events': {
                                 'click': {
-                                    'api': 'plugin/RssSubscribe/delete_history',
+                                    'api': 'plugin/RssPlugin/delete_history',
                                     'method': 'get',
                                     'params': {
                                         'key': title,
