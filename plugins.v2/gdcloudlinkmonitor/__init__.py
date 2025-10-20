@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.9" 
+    plugin_version = "3.0.10" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -286,23 +286,9 @@ class GDCloudLinkMonitor(_PluginBase):
         # 按照配置的目录顺序进行轮询选择，忽略历史记录
         logger.info(f"为 '{mediainfo.title_year}' 按照配置顺序选择目标目录。")
         
-        # 使用可用目录进行轮询
-        last_index = self._round_robin_index.get(mon_path, -1)
-        
-        # 找到上次选择的目录在可用目录列表中的位置
-        last_dest = None
-        if last_index >= 0 and last_index < len(all_destinations):
-            last_dest = all_destinations[last_index]
-            
-        # 在可用目录中找到下一个目录
-        if last_dest and last_dest in available_destinations:
-            last_available_index = available_destinations.index(last_dest)
-            next_available_index = (last_available_index + 1) % len(available_destinations)
-        else:
-            # 如果上次的目录不在可用列表中，从第一个开始
-            next_available_index = 0
-            
-        chosen_dest = available_destinations[next_available_index]
+        # 每次轮询都从第一个目录开始，除非目录被禁用
+        # 获取第一个可用的目录
+        chosen_dest = available_destinations[0]
         
         # 更新全局索引为选择的目录在所有目录中的位置
         chosen_global_index = all_destinations.index(chosen_dest)
@@ -1371,7 +1357,7 @@ class GDCloudLinkMonitor(_PluginBase):
                 # 查找这个文件项
                 file_item = self.storagechain.get_file_item(storage="local", path=file_path)
                 if not file_item:
-                    logger.warn(f"{event_path.name} 未找到对应的文件")
+                    logger.warn(f"{file_path.name} 未找到对应的文件")
                     return
                     
                 # 识别媒体信息
