@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.7" 
+    plugin_version = "3.0.8" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -263,10 +263,10 @@ class GDCloudLinkMonitor(_PluginBase):
 
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
         """
-        根据媒体信息和轮询策略选择一个目标目录。
-        1. 检查此媒体(TMDB ID)是否已有历史记录，如果有，则使用同一目录以保持一致性。
-        2. 如果没有历史记录，则使用轮询算法选择一个新目录。
-        3. 排除被禁用的目标目录。
+        根据配置的目录顺序选择一个目标目录。
+        1. 按照配置的目录顺序进行轮询选择。
+        2. 跳过被禁用的目标目录。
+        3. 忽略历史记录，严格按照配置顺序进行转移。
         """
         all_destinations = self._dirconf.get(mon_path)
         if not all_destinations:
@@ -279,27 +279,12 @@ class GDCloudLinkMonitor(_PluginBase):
             logger.error(f"监控源 {mon_path} 没有可用的目标目录（所有目录都已被禁用）")
             return None
 
-        # 如果只有一个可用目标目录，则无需负载均衡
+        # 如果只有一个可用目标目录，则直接返回
         if len(available_destinations) == 1:
             return available_destinations[0]
 
-        # 1. 检查历史记录以确保同一剧集/电影系列保持在同一目录
-        history_entry = self.transferhis.get_by_type_tmdbid(
-            mtype=mediainfo.type.value,
-            tmdbid=mediainfo.tmdb_id
-        )
-        if history_entry and history_entry.dest:
-            historical_dest_path = Path(history_entry.dest)
-            for dest in available_destinations:
-                try:
-                    if historical_dest_path.is_relative_to(dest):
-                        logger.info(f"为 '{mediainfo.title_year}' 找到了已存在的转移记录，将使用一致的目标目录: {dest}")
-                        return dest
-                except ValueError:
-                    continue
-
-        # 2. 没有找到历史记录, 使用轮询(Round-Robin)算法
-        logger.info(f"首次转移 '{mediainfo.title_year}'，将通过轮询方式选择新目录。")
+        # 按照配置的目录顺序进行轮询选择，忽略历史记录
+        logger.info(f"为 '{mediainfo.title_year}' 按照配置顺序选择目标目录。")
         
         # 使用可用目录进行轮询
         last_index = self._round_robin_index.get(mon_path, -1)
