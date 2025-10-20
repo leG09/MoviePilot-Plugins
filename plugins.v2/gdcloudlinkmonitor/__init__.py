@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.8" 
+    plugin_version = "3.0.9" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -1416,23 +1416,16 @@ class GDCloudLinkMonitor(_PluginBase):
                 else:
                     episodes_info = None
 
-                # 查询转移目的目录
-                target_dir = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
-                if not target_dir or not target_dir.library_path or not target_dir.download_path.startswith(mon_path):
-                    target_dir = TransferDirectoryConf()
-                    target_dir.library_path = target
-                    target_dir.transfer_type = transfer_type
-                    target_dir.scraping = self._scrape
-                    target_dir.renaming = True
-                    target_dir.notify = False
-                    target_dir.overwrite_mode = self._overwrite_mode.get(mon_path) or 'never'
-                    target_dir.library_storage = "local"
-                    target_dir.library_category_folder = self._category
-                else:
-                    # 如果目录助手匹配成功，需要将轮询选择的目标目录赋值给它
-                    target_dir.library_path = target
-                    target_dir.transfer_type = transfer_type
-                    target_dir.scraping = self._scrape
+                # 直接创建转移目录配置，不使用DirectoryHelper避免历史记录检查
+                target_dir = TransferDirectoryConf()
+                target_dir.library_path = target
+                target_dir.transfer_type = transfer_type
+                target_dir.scraping = self._scrape
+                target_dir.renaming = True
+                target_dir.notify = False
+                target_dir.overwrite_mode = self._overwrite_mode.get(mon_path) or 'never'
+                target_dir.library_storage = "local"
+                target_dir.library_category_folder = self._category
                 
                 if not target_dir.library_path:
                     logger.error(f"未配置监控目录 {mon_path} 的目的目录")
