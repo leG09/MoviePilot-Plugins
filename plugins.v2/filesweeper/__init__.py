@@ -33,7 +33,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除MoviePilot转移失败的文件"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -414,55 +414,29 @@ class FileSweeper(_PluginBase):
                             if isinstance(src_fileitem_data, dict):
                                 from app.schemas import FileItem
                                 src_fileitem = FileItem(**src_fileitem_data)
-                                
-                                # 检查文件是否存在
-                                if src_fileitem.path and os.path.exists(src_fileitem.path):
-                                    file_size = 0
-                                    if os.path.isfile(src_fileitem.path):
-                                        file_size = os.path.getsize(src_fileitem.path)
-                                    elif os.path.isdir(src_fileitem.path):
-                                        # 计算目录大小
-                                        for root, dirs, files in os.walk(src_fileitem.path):
-                                            for file in files:
-                                                try:
-                                                    file_size += os.path.getsize(os.path.join(root, file))
-                                                except (OSError, IOError):
-                                                    pass
-                                    
-                                    if not self._dry_run:
-                                        # 使用 StorageChain 删除文件
-                                        storage_chain = StorageChain()
-                                        success = storage_chain.delete_media_file(src_fileitem)
-                                        
-                                        if success:
-                                            logger.info(f"删除转移失败文件: {src_fileitem.path}")
-                                            
-                                            # 发送下载文件删除事件
-                                            eventmanager.send_event(
-                                                EventType.DownloadFileDeleted,
-                                                {
-                                                    "src": transfer.src,
-                                                    "hash": transfer.download_hash
-                                                }
-                                            )
-                                            
-                                            # 删除转移记录
-                                            TransferHistory.delete(db, transfer.id)
-                                            
-                                            cleaned_files.append({
-                                                "path": src_fileitem.path,
-                                                "size": file_size,
-                                                "modified": transfer.date,
-                                                "title": transfer.title,
-                                                "type": "failed_transfer"
-                                            })
-                                            total_size += file_size
-                                        else:
-                                            error_msg = f"删除转移失败文件失败: {src_fileitem.path}"
-                                            logger.error(error_msg)
-                                            errors.append(error_msg)
-                                    else:
-                                        logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
+                                # 读取大小（如有）用于统计
+                                file_size = int(src_fileitem_data.get("size", 0)) if isinstance(src_fileitem_data.get("size", 0), (int, float)) else 0
+
+                                if not self._dry_run:
+                                    # 使用 StorageChain 删除文件（支持各类存储后端）
+                                    storage_chain = StorageChain()
+                                    success = storage_chain.delete_media_file(src_fileitem)
+
+                                    if success:
+                                        logger.info(f"删除转移失败文件: {src_fileitem.path}")
+
+                                        # 发送下载文件删除事件
+                                        eventmanager.send_event(
+                                            EventType.DownloadFileDeleted,
+                                            {
+                                                "src": transfer.src,
+                                                "hash": transfer.download_hash
+                                            }
+                                        )
+
+                                        # 删除转移记录（仅在删除成功后）
+                                        TransferHistory.delete(db, transfer.id)
+
                                         cleaned_files.append({
                                             "path": src_fileitem.path,
                                             "size": file_size,
@@ -471,12 +445,20 @@ class FileSweeper(_PluginBase):
                                             "type": "failed_transfer"
                                         })
                                         total_size += file_size
+                                    else:
+                                        error_msg = f"删除转移失败文件失败: {src_fileitem.path}"
+                                        logger.error(error_msg)
+                                        errors.append(error_msg)
                                 else:
-                                    logger.warning(f"转移失败文件不存在: {src_fileitem.path}")
-                                    # 文件不存在，直接删除记录
-                                    if not self._dry_run:
-                                        TransferHistory.delete(db, transfer.id)
-                                        logger.info(f"删除不存在的转移失败记录: {transfer.id}")
+                                    logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
+                                    cleaned_files.append({
+                                        "path": src_fileitem.path,
+                                        "size": file_size,
+                                        "modified": transfer.date,
+                                        "title": transfer.title,
+                                        "type": "failed_transfer"
+                                    })
+                                    total_size += file_size
                             else:
                                 logger.warning(f"转移记录 {transfer.id} 的 src_fileitem 格式错误")
                         else:
