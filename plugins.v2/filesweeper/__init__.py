@@ -10,6 +10,8 @@ except ImportError:
     from typing import Annotated
 
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import select, and_
+from sqlalchemy.orm import Session
 
 from app.plugins import _PluginBase
 from app.core.config import settings
@@ -17,17 +19,21 @@ from app.core.security import verify_apikey
 from app.schemas import Notification, NotificationType, ContentType
 from app.schemas.types import EventType
 from app.log import logger
+from app.db import get_db, SessionFactory
+from app.db.models.transferhistory import TransferHistory
+from app.chain.storage import StorageChain
+from app.core.event import eventmanager
 
 
 class FileSweeper(_PluginBase):
-    """文件清理器插件 - 定时删除指定目录超过N小时的文件夹和文件"""
+    """转移失败文件清理器插件 - 定时删除MoviePilot转移失败的文件"""
     
     # 插件信息
     plugin_name = "FileSweeper"
-    plugin_desc = "定时删除指定目录超过N小时的文件夹和文件，支持多种过滤条件"
+    plugin_desc = "定时删除MoviePilot转移失败的文件"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "1.0"
+    plugin_version = "2.0"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -36,23 +42,17 @@ class FileSweeper(_PluginBase):
         """初始化插件"""
         self._enabled = config.get("enabled", False) if config else False
         self._cron = config.get("cron", "0 2 * * *") if config else "0 2 * * *"  # 默认每天凌晨2点执行
-        self._clean_directories = config.get("clean_directories", "") if config else ""
-        # 兼容字符串/数字输入
-        self._max_age_hours = self._to_float(config.get("max_age_hours", 24) if config else 24, 24.0)
-        self._delete_empty_dirs = config.get("delete_empty_dirs", True) if config else True
-        self._delete_files = config.get("delete_files", True) if config else True
-        self._file_extensions = config.get("file_extensions", "") if config else ""
-        self._exclude_patterns = config.get("exclude_patterns", "") if config else ""
         self._dry_run = config.get("dry_run", False) if config else False
         self._send_notification = config.get("send_notification", True) if config else True
-        self._min_size_mb = self._to_float(config.get("min_size_mb", 0) if config else 0, 0.0)
-        self._max_size_mb = self._to_float(config.get("max_size_mb", 0) if config else 0, 0.0)
+        
+        # 转移失败文件清理配置
+        self._failed_transfer_age_hours = self._to_float(config.get("failed_transfer_age_hours", 24) if config else 24, 24.0)
         
         logger.info(f"FileSweeper插件初始化完成，启用状态: {self._enabled}")
         if self._enabled:
-            logger.info(f"清理目录: {self._clean_directories}")
-            logger.info(f"最大年龄: {self._max_age_hours}小时")
             logger.info(f"定时任务: {self._cron}")
+            logger.info(f"转移失败文件最大年龄: {self._failed_transfer_age_hours}小时")
+            logger.info(f"预览模式: {self._dry_run}")
 
     def get_state(self) -> bool:
         """获取插件状态"""
@@ -65,7 +65,7 @@ class FileSweeper(_PluginBase):
             {
                 "cmd": "/filesweeper",
                 "event": EventType.PluginAction,
-                "desc": "手动执行文件清理",
+                "desc": "手动执行转移失败文件清理",
                 "category": "清理",
                 "data": {
                     "action": "manual_clean"
@@ -80,15 +80,15 @@ class FileSweeper(_PluginBase):
                 "path": "/manual_clean",
                 "endpoint": self.manual_clean,
                 "methods": ["POST"],
-                "summary": "手动执行清理",
-                "description": "手动触发自动清理任务"
+                "summary": "手动执行转移失败文件清理",
+                "description": "手动触发转移失败文件清理任务"
             },
             {
                 "path": "/preview_clean",
                 "endpoint": self.preview_clean,
                 "methods": ["POST"],
-                "summary": "预览清理",
-                "description": "预览将要清理的文件和目录，不实际删除"
+                "summary": "预览转移失败文件清理",
+                "description": "预览将要清理的转移失败文件，不实际删除"
             }
         ]
 
@@ -156,8 +156,8 @@ class FileSweeper(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "max_age_hours",
-                                            "label": "最大年龄（小时）",
+                                            "model": "failed_transfer_age_hours",
+                                            "label": "转移失败文件最大年龄（小时）",
                                             "type": "number",
                                             "placeholder": "24"
                                         }
@@ -171,126 +171,7 @@ class FileSweeper(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "clean_directories",
-                                            "label": "清理目录列表",
-                                            "placeholder": "每行一个目录路径，例如：\n/tmp/downloads\n/var/cache\n/media/temp",
-                                            "rows": 4,
-                                            "hint": "每行一个目录路径，支持绝对路径"
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "delete_files",
-                                            "label": "删除文件",
-                                            "color": "primary"
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "delete_empty_dirs",
-                                            "label": "删除空目录",
-                                            "color": "primary"
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "file_extensions",
-                                            "label": "文件扩展名过滤",
-                                            "placeholder": ".tmp,.log,.cache",
-                                            "hint": "逗号分隔的文件扩展名，留空表示所有文件"
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "exclude_patterns",
-                                            "label": "排除模式",
-                                            "placeholder": "*.important,*.backup",
-                                            "hint": "逗号分隔的排除模式，支持通配符"
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "min_size_mb",
-                                            "label": "最小文件大小（MB）",
-                                            "type": "number",
-                                            "placeholder": "0"
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "max_size_mb",
-                                            "label": "最大文件大小（MB）",
-                                            "type": "number",
-                                            "placeholder": "0（无限制）"
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -314,8 +195,26 @@ class FileSweeper(_PluginBase):
                                     {
                                         "component": "VAlert",
                                         "props": {
+                                            "type": "info",
+                                            "text": "此插件专门用于清理MoviePilot转移失败的文件。插件会查询数据库中转移失败的记录，删除超过指定时间的源文件，并发送相应的事件通知。"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
                                             "type": "warning",
-                                            "text": "警告：此插件会删除文件，请谨慎配置。建议先在预览模式下测试。"
+                                            "text": "警告：此插件会删除转移失败的文件，请谨慎配置。建议先在预览模式下测试。"
                                         }
                                     }
                                 ]
@@ -327,16 +226,9 @@ class FileSweeper(_PluginBase):
         ], {
             "enabled": False,
             "cron": "0 2 * * *",
-            "clean_directories": "",
-            "max_age_hours": 24,
-            "delete_empty_dirs": True,
-            "delete_files": True,
-            "file_extensions": "",
-            "exclude_patterns": "",
             "dry_run": False,
             "send_notification": True,
-            "min_size_mb": 0,
-            "max_size_mb": 0
+            "failed_transfer_age_hours": 24
         }
 
     def get_page(self) -> list:
@@ -350,7 +242,7 @@ class FileSweeper(_PluginBase):
         if self._enabled and self._cron:
             return [{
                 "id": "FileSweeper",
-                "name": "文件清理服务",
+                "name": "转移失败文件清理服务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self._execute_clean,
                 "kwargs": {}
@@ -363,7 +255,7 @@ class FileSweeper(_PluginBase):
 
     def manual_clean(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
-        手动执行清理任务
+        手动执行转移失败文件清理任务
         
         Args:
             request_data: 请求数据
@@ -373,25 +265,25 @@ class FileSweeper(_PluginBase):
             Dict: 清理结果
         """
         try:
-            logger.info("开始手动执行清理任务")
+            logger.info("开始手动执行转移失败文件清理任务")
             
             # 执行清理
             result = self._execute_clean()
             
             return {
                 "success": True,
-                "message": "手动清理任务执行完成",
+                "message": "手动转移失败文件清理任务执行完成",
                 "result": result
             }
             
         except Exception as e:
-            error_msg = f"手动清理任务执行失败：{str(e)}"
+            error_msg = f"手动转移失败文件清理任务执行失败：{str(e)}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
     def preview_clean(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
-        预览清理任务
+        预览转移失败文件清理任务
         
         Args:
             request_data: 请求数据
@@ -401,7 +293,7 @@ class FileSweeper(_PluginBase):
             Dict: 预览结果
         """
         try:
-            logger.info("开始预览清理任务")
+            logger.info("开始预览转移失败文件清理任务")
             
             # 临时启用预览模式
             original_dry_run = self._dry_run
@@ -415,80 +307,37 @@ class FileSweeper(_PluginBase):
             
             return {
                 "success": True,
-                "message": "预览清理任务完成",
+                "message": "预览转移失败文件清理任务完成",
                 "result": result
             }
             
         except Exception as e:
-            error_msg = f"预览清理任务失败：{str(e)}"
+            error_msg = f"预览转移失败文件清理任务失败：{str(e)}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
     def _execute_clean(self) -> Dict[str, Any]:
         """
-        执行清理任务
+        执行转移失败文件清理任务
         
         Returns:
             Dict: 清理结果
         """
         try:
-            logger.info("=== 开始执行文件清理任务 ===")
-            
-            if not self._clean_directories:
-                logger.warning("未配置清理目录")
-                return {
-                    "success": False,
-                    "message": "未配置清理目录",
-                    "cleaned_files": [],
-                    "cleaned_dirs": [],
-                    "total_size": 0
-                }
-            
-            # 解析清理目录
-            directories = [d.strip() for d in self._clean_directories.split('\n') if d.strip()]
-            
-            # 解析文件扩展名
-            extensions = [ext.strip().lower() for ext in self._file_extensions.split(',') if ext.strip()] if self._file_extensions else []
-            
-            # 解析排除模式
-            exclude_patterns = [pattern.strip() for pattern in self._exclude_patterns.split(',') if pattern.strip()] if self._exclude_patterns else []
-            
-            # 计算时间阈值（确保为float）
-            cutoff_time = datetime.now() - timedelta(hours=float(self._max_age_hours))
+            logger.info("=== 开始执行转移失败文件清理任务 ===")
             
             cleaned_files = []
             cleaned_dirs = []
             total_size = 0
             errors = []
             
-            logger.info(f"开始清理任务，时间阈值: {cutoff_time}")
-            logger.info(f"清理目录: {directories}")
-            logger.info(f"文件扩展名过滤: {extensions}")
-            logger.info(f"排除模式: {exclude_patterns}")
-            logger.info(f"预览模式: {self._dry_run}")
-            
-            for directory in directories:
-                try:
-                    if not os.path.exists(directory):
-                        logger.warning(f"目录不存在: {directory}")
-                        continue
-                    
-                    logger.info(f"开始清理目录: {directory}")
-                    
-                    # 清理文件和目录
-                    dir_result = self._clean_directory(
-                        directory, cutoff_time, extensions, exclude_patterns
-                    )
-                    
-                    cleaned_files.extend(dir_result["files"])
-                    cleaned_dirs.extend(dir_result["dirs"])
-                    total_size += dir_result["size"]
-                    errors.extend(dir_result["errors"])
-                    
-                except Exception as e:
-                    error_msg = f"清理目录 {directory} 时发生错误: {str(e)}"
-                    logger.error(error_msg)
-                    errors.append(error_msg)
+            # 清理转移失败的文件
+            logger.info("开始清理转移失败的文件")
+            failed_result = self._clean_failed_transfer_files()
+            cleaned_files.extend(failed_result["files"])
+            cleaned_dirs.extend(failed_result["dirs"])
+            total_size += failed_result["size"]
+            errors.extend(failed_result["errors"])
             
             # 发送通知
             if self._send_notification and (cleaned_files or cleaned_dirs):
@@ -496,7 +345,7 @@ class FileSweeper(_PluginBase):
             
             result = {
                 "success": len(errors) == 0,
-                "message": f"清理完成 - 文件: {len(cleaned_files)}, 目录: {len(cleaned_dirs)}, 总大小: {self._format_size(total_size)}",
+                "message": f"转移失败文件清理完成 - 文件: {len(cleaned_files)}, 目录: {len(cleaned_dirs)}, 总大小: {self._format_size(total_size)}",
                 "cleaned_files": cleaned_files,
                 "cleaned_dirs": cleaned_dirs,
                 "total_size": total_size,
@@ -504,7 +353,7 @@ class FileSweeper(_PluginBase):
                 "dry_run": self._dry_run
             }
             
-            logger.info(f"=== 清理任务完成 ===")
+            logger.info(f"=== 转移失败文件清理任务完成 ===")
             logger.info(f"结果: {result['message']}")
             if errors:
                 logger.warning(f"错误数量: {len(errors)}")
@@ -514,7 +363,7 @@ class FileSweeper(_PluginBase):
             return result
             
         except Exception as e:
-            error_msg = f"执行清理任务时发生错误: {str(e)}"
+            error_msg = f"执行转移失败文件清理任务时发生错误: {str(e)}"
             logger.error(error_msg)
             return {
                 "success": False,
@@ -525,17 +374,10 @@ class FileSweeper(_PluginBase):
                 "errors": [error_msg]
             }
 
-    def _clean_directory(self, directory: str, cutoff_time: datetime, 
-                        extensions: List[str], exclude_patterns: List[str]) -> Dict[str, Any]:
+    def _clean_failed_transfer_files(self) -> Dict[str, Any]:
         """
-        清理单个目录
+        清理转移失败的文件
         
-        Args:
-            directory: 目录路径
-            cutoff_time: 时间阈值
-            extensions: 文件扩展名列表
-            exclude_patterns: 排除模式列表
-            
         Returns:
             Dict: 清理结果
         """
@@ -545,69 +387,116 @@ class FileSweeper(_PluginBase):
         errors = []
         
         try:
-            # 遍历目录
-            for root, dirs, files in os.walk(directory, topdown=False):
-                # 处理文件
-                if self._delete_files:
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        try:
-                            # 检查文件是否应该被删除
-                            if self._should_delete_file(file_path, cutoff_time, extensions, exclude_patterns):
-                                # 读取元数据前再次确认文件存在，避免竞态
-                                if not os.path.exists(file_path):
-                                    continue
-                                file_size = os.path.getsize(file_path)
-                                file_mtime_iso = datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
-                                
-                                if not self._dry_run:
-                                    try:
-                                        os.remove(file_path)
-                                        logger.info(f"删除文件: {file_path}")
-                                    except FileNotFoundError:
-                                        # 被其他进程删除，忽略
-                                        logger.debug(f"文件已不存在，跳过: {file_path}")
-                                        continue
-                                else:
-                                    logger.info(f"[预览] 将删除文件: {file_path}")
-                                
-                                cleaned_files.append({
-                                    "path": file_path,
-                                    "size": file_size,
-                                    "modified": file_mtime_iso
-                                })
-                                total_size += file_size
-                                
-                        except Exception as e:
-                            error_msg = f"删除文件 {file_path} 时发生错误: {str(e)}"
-                            logger.error(error_msg)
-                            errors.append(error_msg)
+            # 计算时间阈值
+            cutoff_time = datetime.now() - timedelta(hours=float(self._failed_transfer_age_hours))
+            cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str}")
+            
+            # 创建数据库会话
+            db = SessionFactory()
+            try:
+                # 查询转移失败的记录
+                failed_transfers = db.query(TransferHistory).filter(
+                    and_(
+                        TransferHistory.status == False,  # 转移失败
+                        TransferHistory.date <= cutoff_time_str  # 超过指定时间
+                    )
+                ).all()
                 
-                # 处理空目录
-                if self._delete_empty_dirs:
-                    for dir_name in dirs:
-                        dir_path = os.path.join(root, dir_name)
-                        try:
-                            # 检查目录是否为空且超过时间阈值
-                            if self._should_delete_directory(dir_path, cutoff_time):
-                                if not self._dry_run:
-                                    shutil.rmtree(dir_path)
-                                    logger.info(f"删除目录: {dir_path}")
+                logger.info(f"找到 {len(failed_transfers)} 条转移失败记录")
+                
+                for transfer in failed_transfers:
+                    try:
+                        # 删除源文件
+                        if transfer.src_fileitem:
+                            src_fileitem_data = transfer.src_fileitem
+                            if isinstance(src_fileitem_data, dict):
+                                from app.schemas import FileItem
+                                src_fileitem = FileItem(**src_fileitem_data)
+                                
+                                # 检查文件是否存在
+                                if src_fileitem.path and os.path.exists(src_fileitem.path):
+                                    file_size = 0
+                                    if os.path.isfile(src_fileitem.path):
+                                        file_size = os.path.getsize(src_fileitem.path)
+                                    elif os.path.isdir(src_fileitem.path):
+                                        # 计算目录大小
+                                        for root, dirs, files in os.walk(src_fileitem.path):
+                                            for file in files:
+                                                try:
+                                                    file_size += os.path.getsize(os.path.join(root, file))
+                                                except (OSError, IOError):
+                                                    pass
+                                    
+                                    if not self._dry_run:
+                                        # 使用 StorageChain 删除文件
+                                        storage_chain = StorageChain()
+                                        success = storage_chain.delete_media_file(src_fileitem)
+                                        
+                                        if success:
+                                            logger.info(f"删除转移失败文件: {src_fileitem.path}")
+                                            
+                                            # 发送下载文件删除事件
+                                            eventmanager.send_event(
+                                                EventType.DownloadFileDeleted,
+                                                {
+                                                    "src": transfer.src,
+                                                    "hash": transfer.download_hash
+                                                }
+                                            )
+                                            
+                                            # 删除转移记录
+                                            TransferHistory.delete(db, transfer.id)
+                                            
+                                            cleaned_files.append({
+                                                "path": src_fileitem.path,
+                                                "size": file_size,
+                                                "modified": transfer.date,
+                                                "title": transfer.title,
+                                                "type": "failed_transfer"
+                                            })
+                                            total_size += file_size
+                                        else:
+                                            error_msg = f"删除转移失败文件失败: {src_fileitem.path}"
+                                            logger.error(error_msg)
+                                            errors.append(error_msg)
+                                    else:
+                                        logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
+                                        cleaned_files.append({
+                                            "path": src_fileitem.path,
+                                            "size": file_size,
+                                            "modified": transfer.date,
+                                            "title": transfer.title,
+                                            "type": "failed_transfer"
+                                        })
+                                        total_size += file_size
                                 else:
-                                    logger.info(f"[预览] 将删除目录: {dir_path}")
-                                
-                                cleaned_dirs.append({
-                                    "path": dir_path,
-                                    "modified": datetime.fromtimestamp(os.path.getmtime(dir_path)).isoformat()
-                                })
-                                
-                        except Exception as e:
-                            error_msg = f"删除目录 {dir_path} 时发生错误: {str(e)}"
-                            logger.error(error_msg)
-                            errors.append(error_msg)
+                                    logger.warning(f"转移失败文件不存在: {src_fileitem.path}")
+                                    # 文件不存在，直接删除记录
+                                    if not self._dry_run:
+                                        TransferHistory.delete(db, transfer.id)
+                                        logger.info(f"删除不存在的转移失败记录: {transfer.id}")
+                            else:
+                                logger.warning(f"转移记录 {transfer.id} 的 src_fileitem 格式错误")
+                        else:
+                            logger.warning(f"转移记录 {transfer.id} 没有源文件信息")
                             
+                    except Exception as e:
+                        error_msg = f"处理转移失败记录 {transfer.id} 时发生错误: {str(e)}"
+                        logger.error(error_msg)
+                        errors.append(error_msg)
+                
+                # 提交数据库更改
+                if not self._dry_run:
+                    db.commit()
+                    logger.info("数据库更改已提交")
+                
+            finally:
+                db.close()
+                
         except Exception as e:
-            error_msg = f"遍历目录 {directory} 时发生错误: {str(e)}"
+            error_msg = f"清理转移失败文件时发生错误: {str(e)}"
             logger.error(error_msg)
             errors.append(error_msg)
         
@@ -618,88 +507,6 @@ class FileSweeper(_PluginBase):
             "errors": errors
         }
 
-    def _should_delete_file(self, file_path: str, cutoff_time: datetime, 
-                           extensions: List[str], exclude_patterns: List[str]) -> bool:
-        """
-        判断文件是否应该被删除
-        
-        Args:
-            file_path: 文件路径
-            cutoff_time: 时间阈值
-            extensions: 文件扩展名列表
-            exclude_patterns: 排除模式列表
-            
-        Returns:
-            bool: 是否应该删除
-        """
-        try:
-            # 检查文件是否存在
-            if not os.path.exists(file_path):
-                return False
-            
-            # 检查文件修改时间
-            file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
-            if file_mtime > cutoff_time:
-                return False
-            
-            # 检查文件扩展名
-            if extensions:
-                file_ext = os.path.splitext(file_path)[1].lower()
-                if file_ext not in extensions:
-                    return False
-            
-            # 检查排除模式
-            if exclude_patterns:
-                import fnmatch
-                for pattern in exclude_patterns:
-                    if fnmatch.fnmatch(os.path.basename(file_path), pattern):
-                        return False
-            
-            # 检查文件大小
-            file_size = os.path.getsize(file_path)
-            min_bytes = float(self._min_size_mb) * 1024 * 1024 if self._min_size_mb else 0
-            max_bytes = float(self._max_size_mb) * 1024 * 1024 if self._max_size_mb else 0
-            if min_bytes > 0 and file_size < min_bytes:
-                return False
-            if max_bytes > 0 and file_size > max_bytes:
-                return False
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"检查文件 {file_path} 时发生错误: {str(e)}")
-            return False
-
-    def _should_delete_directory(self, dir_path: str, cutoff_time: datetime) -> bool:
-        """
-        判断目录是否应该被删除
-        
-        Args:
-            dir_path: 目录路径
-            cutoff_time: 时间阈值
-            
-        Returns:
-            bool: 是否应该删除
-        """
-        try:
-            # 检查目录是否存在
-            if not os.path.exists(dir_path):
-                return False
-            
-            # 检查目录是否为空
-            if os.listdir(dir_path):
-                return False
-            
-            # 检查目录修改时间
-            dir_mtime = datetime.fromtimestamp(os.path.getmtime(dir_path))
-            if dir_mtime > cutoff_time:
-                return False
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"检查目录 {dir_path} 时发生错误: {str(e)}")
-            return False
 
     def _format_size(self, size_bytes: int) -> str:
         """
@@ -726,7 +533,7 @@ class FileSweeper(_PluginBase):
     def _send_clean_notification(self, cleaned_files: List[Dict], cleaned_dirs: List[Dict], 
                                 total_size: int, errors: List[str]):
         """
-        发送清理通知
+        发送转移失败文件清理通知
         
         Args:
             cleaned_files: 已清理的文件列表
@@ -736,7 +543,7 @@ class FileSweeper(_PluginBase):
         """
         try:
             # 构建通知消息
-            message = f"自动清理任务完成\n\n"
+            message = f"转移失败文件清理任务完成\n\n"
             message += f"清理文件: {len(cleaned_files)} 个\n"
             message += f"清理目录: {len(cleaned_dirs)} 个\n"
             message += f"释放空间: {self._format_size(total_size)}\n"
@@ -751,7 +558,7 @@ class FileSweeper(_PluginBase):
             notification = Notification(
                 channel="FileSweeper",
                 mtype=NotificationType.Manual,
-                title="文件清理任务完成",
+                title="转移失败文件清理完成",
                 text=message,
                 image=""
             )
