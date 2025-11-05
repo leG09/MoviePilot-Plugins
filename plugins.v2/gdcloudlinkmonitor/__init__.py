@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.0.11" 
+    plugin_version = "3.0.12" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -147,7 +147,6 @@ class GDCloudLinkMonitor(_PluginBase):
     _ai_keys_file: Path = None
     _ai_timeout = 30
     _ai_cache_days = 5  # AI识别记录缓存天数
-    _auto_delete_source_after_ai_naming = False  # AI规范命名完成后自动删除源文件
     _ai_prompt_template = (
         "基于文件夹内所有媒体文件名，生成规范化目录名。\n"
         "输入：该文件夹内所有文件的完整路径列表。\n"
@@ -1023,7 +1022,6 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._ai_key_index = saved_index if self._ai_api_keys else -1
             self._ai_timeout = config.get("ai_timeout", 30)
             self._ai_cache_days = config.get("ai_cache_days", 5)
-            self._auto_delete_source_after_ai_naming = config.get("auto_delete_source_after_ai_naming", False)
 
         # 停止现有任务
         self.stop_service()
@@ -1283,39 +1281,13 @@ class GDCloudLinkMonitor(_PluginBase):
                             
                             if dir_key in self._ai_normalized_dirs:
                                 logger.info(f"目录已记录为已规范命名，跳过AI：{dir_key}")
-                                # 文件已处理过且AI规范命名已完成，删除源文件以节省空间
-                                if self._auto_delete_source_after_ai_naming:
+                                # 如果文件已处理过且AI规范命名也触发过，则删除转移记录
+                                if transfer_history and transfer_history.id:
                                     try:
-                                        if transfer_history and transfer_history.src_fileitem:
-                                            src_fileitem_data = transfer_history.src_fileitem
-                                            if isinstance(src_fileitem_data, dict):
-                                                src_fileitem = schemas.FileItem(**src_fileitem_data)
-                                                
-                                                # 使用 StorageChain 删除文件（支持各类存储后端）
-                                                storage_chain = StorageChain()
-                                                success = storage_chain.delete_media_file(src_fileitem)
-                                                
-                                                if success:
-                                                    logger.info(f"已删除已处理且AI规范命名完成的源文件：{src_fileitem.path}")
-                                                    
-                                                    # 发送下载文件删除事件
-                                                    eventmanager.send_event(
-                                                        EventType.DownloadFileDeleted,
-                                                        {
-                                                            "src": transfer_history.src,
-                                                            "hash": transfer_history.download_hash
-                                                        }
-                                                    )
-                                                else:
-                                                    logger.warning(f"删除源文件失败：{src_fileitem.path}")
-                                            else:
-                                                logger.warning(f"转移记录 {transfer_history.id} 的 src_fileitem 格式错误")
-                                        else:
-                                            logger.debug(f"转移记录 {transfer_history.id if transfer_history else 'None'} 没有源文件信息")
+                                        self.transferhis.delete(transfer_history.id)
+                                        logger.info(f"已删除转移记录（ID: {transfer_history.id}），文件：{event_path}，目录：{dir_key}")
                                     except Exception as e:
-                                        logger.error(f"删除已处理文件的源文件时发生错误: {str(e)}")
-                                else:
-                                    logger.debug(f"自动删除源文件功能未启用，跳过删除：{dir_key}")
+                                        logger.error(f"删除转移记录失败：{e}")
                             elif dir_key in self._ai_processed_dirs:
                                 logger.info(f"目录本次运行已触发过AI，跳过重复调用：{dir_key}")
                             else:
@@ -1331,40 +1303,6 @@ class GDCloudLinkMonitor(_PluginBase):
                                         self._ai_normalized_dirs.add(dir_key)
                                         self._save_ai_normalized_state()
                                         logger.info(f"AI文件夹重命名成功：{dir_path}")
-                                        
-                                        # AI规范命名完成后，删除源文件以节省空间
-                                        if self._auto_delete_source_after_ai_naming:
-                                            try:
-                                                if transfer_history and transfer_history.src_fileitem:
-                                                    src_fileitem_data = transfer_history.src_fileitem
-                                                    if isinstance(src_fileitem_data, dict):
-                                                        src_fileitem = schemas.FileItem(**src_fileitem_data)
-                                                        
-                                                        # 使用 StorageChain 删除文件（支持各类存储后端）
-                                                        storage_chain = StorageChain()
-                                                        success = storage_chain.delete_media_file(src_fileitem)
-                                                        
-                                                        if success:
-                                                            logger.info(f"已删除已处理且AI规范命名完成的源文件：{src_fileitem.path}")
-                                                            
-                                                            # 发送下载文件删除事件
-                                                            eventmanager.send_event(
-                                                                EventType.DownloadFileDeleted,
-                                                                {
-                                                                    "src": transfer_history.src,
-                                                                    "hash": transfer_history.download_hash
-                                                                }
-                                                            )
-                                                        else:
-                                                            logger.warning(f"删除源文件失败：{src_fileitem.path}")
-                                                    else:
-                                                        logger.warning(f"转移记录 {transfer_history.id} 的 src_fileitem 格式错误")
-                                                else:
-                                                    logger.debug(f"转移记录 {transfer_history.id if transfer_history else 'None'} 没有源文件信息")
-                                            except Exception as e:
-                                                logger.error(f"删除已处理文件的源文件时发生错误: {str(e)}")
-                                        else:
-                                            logger.debug(f"自动删除源文件功能未启用，跳过删除：{dir_key}")
                                     else:
                                         logger.warning(f"AI文件夹重命名失败：{dir_path}")
                     except Exception as e:
@@ -2078,12 +2016,6 @@ class GDCloudLinkMonitor(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {'cols': 12, 'md': 4},
-                                'content': [
-                                    {'component': 'VSwitch', 'props': {'model': 'auto_delete_source_after_ai_naming', 'label': 'AI规范命名后自动删除源文件'}}]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 4},
                                 'content': [{
                                     'component': 'VTextField',
                                     'props': {'model': 'ai_api_url', 'label': 'AI接口地址', 'placeholder': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'}
@@ -2141,7 +2073,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "recovery_check_interval": 1800, "mount_path_mapping": "",
             "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
             "ai_provider": "gemini", "ai_rename_enabled": False, "ai_api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-            "ai_model": "gemini-2.0-flash", "ai_timeout": 30, "ai_cache_days": 5, "auto_delete_source_after_ai_naming": False
+            "ai_model": "gemini-2.0-flash", "ai_timeout": 30, "ai_cache_days": 5
         }
 
     def get_page(self) -> List[dict]:
