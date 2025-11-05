@@ -27,7 +27,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -425,21 +425,26 @@ class EmbyEpisodeSync(_PluginBase):
                         skipped_count += 1
                         continue
                     
-                    # 计算需要保留的集数（只在Emby中存在的集数）
+                    # 使用Emby的集数作为新的已下载集数（去重并排序）
                     emby_episodes_set = set(emby_episodes)
                     current_episodes_set = set(current_episodes)
+                    new_episodes = sorted(list(emby_episodes_set))
                     
-                    # 只保留在Emby中存在的集数
-                    new_episodes = sorted(list(current_episodes_set.intersection(emby_episodes_set)))
+                    # 计算移除的集数（在订阅已下载中但Emby中不存在的）
+                    removed_episodes = sorted(list(current_episodes_set - emby_episodes_set))
+                    # 计算新增的集数（在Emby中但订阅已下载中不存在的）
+                    added_episodes = sorted(list(emby_episodes_set - current_episodes_set))
                     
                     # 如果集数有变化，更新订阅
                     if set(new_episodes) != current_episodes_set:
-                        removed_episodes = sorted(list(current_episodes_set - emby_episodes_set))
                         
                         logger.info(f"订阅 {subscribe.name} S{subscribe.season:02d} 更新集数：")
                         logger.info(f"  当前集数: {sorted(current_episodes)}")
                         logger.info(f"  Emby集数: {sorted(emby_episodes)}")
-                        logger.info(f"  移除集数: {removed_episodes}")
+                        if removed_episodes:
+                            logger.info(f"  移除集数: {removed_episodes}")
+                        if added_episodes:
+                            logger.info(f"  新增集数: {added_episodes}")
                         logger.info(f"  新集数: {new_episodes}")
                         
                         # 更新订阅的note字段
@@ -452,6 +457,7 @@ class EmbyEpisodeSync(_PluginBase):
                             "name": subscribe.name,
                             "season": subscribe.season,
                             "removed_episodes": removed_episodes,
+                            "added_episodes": added_episodes,
                             "new_episodes": new_episodes
                         })
                     else:
@@ -515,8 +521,13 @@ class EmbyEpisodeSync(_PluginBase):
             if updated_subscribes:
                 message += f"\n更新的订阅:\n"
                 for sub_info in updated_subscribes[:10]:  # 最多显示10个
-                    removed_str = f"移除: {', '.join(map(str, sub_info['removed_episodes']))}" if sub_info['removed_episodes'] else "无移除"
-                    message += f"  {sub_info['name']} S{sub_info['season']:02d} - {removed_str}\n"
+                    changes = []
+                    if sub_info.get('removed_episodes'):
+                        changes.append(f"移除: {', '.join(map(str, sub_info['removed_episodes']))}")
+                    if sub_info.get('added_episodes'):
+                        changes.append(f"新增: {', '.join(map(str, sub_info['added_episodes']))}")
+                    change_str = " | ".join(changes) if changes else "无变化"
+                    message += f"  {sub_info['name']} S{sub_info['season']:02d} - {change_str}\n"
                 
                 if len(updated_subscribes) > 10:
                     message += f"  ... 还有 {len(updated_subscribes) - 10} 个订阅已更新\n"
