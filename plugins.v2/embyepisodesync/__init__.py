@@ -27,7 +27,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -394,16 +394,8 @@ class EmbyEpisodeSync(_PluginBase):
                         skipped_count += 1
                         continue
                     
-                    # 跳过没有note的订阅
-                    if not subscribe.note:
-                        skipped_count += 1
-                        continue
-                    
-                    # 获取订阅的已下载集数
+                    # 获取订阅的已下载集数（允许为空，空数组时也需要从Emby恢复）
                     current_episodes = subscribe.note or []
-                    if not current_episodes:
-                        skipped_count += 1
-                        continue
                     
                     # 查询Emby中的集数
                     emby_item_id, emby_season_episodes = emby.get_tv_episodes(
@@ -429,6 +421,12 @@ class EmbyEpisodeSync(_PluginBase):
                     emby_episodes_set = set(emby_episodes)
                     current_episodes_set = set(current_episodes)
                     new_episodes = sorted(list(emby_episodes_set))
+                    
+                    # 安全检查：如果Emby集数为空，不应该更新（避免数据丢失）
+                    if not new_episodes:
+                        logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} Emby集数为空，跳过更新以避免数据丢失")
+                        skipped_count += 1
+                        continue
                     
                     # 计算移除的集数（在订阅已下载中但Emby中不存在的）
                     removed_episodes = sorted(list(current_episodes_set - emby_episodes_set))
