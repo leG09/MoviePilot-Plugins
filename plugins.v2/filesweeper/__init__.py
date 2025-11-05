@@ -33,7 +33,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除MoviePilot转移失败的文件"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.3"
+    plugin_version = "2.1"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -48,15 +48,11 @@ class FileSweeper(_PluginBase):
         # 转移失败文件清理配置
         self._failed_transfer_age_hours = self._to_float(config.get("failed_transfer_age_hours", 24) if config else 24, 24.0)
         
-        # 清理已处理文件配置
-        self._clean_processed_files = config.get("clean_processed_files", False) if config else False
-        
         logger.info(f"FileSweeper插件初始化完成，启用状态: {self._enabled}")
         if self._enabled:
             logger.info(f"定时任务: {self._cron}")
             logger.info(f"转移失败文件最大年龄: {self._failed_transfer_age_hours}小时")
             logger.info(f"预览模式: {self._dry_run}")
-            logger.info(f"清理已处理文件: {self._clean_processed_files}")
 
     def get_state(self) -> bool:
         """获取插件状态"""
@@ -186,21 +182,6 @@ class FileSweeper(_PluginBase):
                                         }
                                     }
                                 ]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "clean_processed_files",
-                                            "label": "清理已处理文件",
-                                            "color": "warning",
-                                            "hint": "如果文件已在转移历史中成功处理过，则删除该文件"
-                                        }
-                                    }
-                                ]
                             }
                         ]
                     },
@@ -247,8 +228,7 @@ class FileSweeper(_PluginBase):
             "cron": "0 2 * * *",
             "dry_run": False,
             "send_notification": True,
-            "failed_transfer_age_hours": 24,
-            "clean_processed_files": False
+            "failed_transfer_age_hours": 24
         }
 
     def get_page(self) -> list:
@@ -411,10 +391,7 @@ class FileSweeper(_PluginBase):
             cutoff_time = datetime.now() - timedelta(hours=float(self._failed_transfer_age_hours))
             cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
             
-            if self._clean_processed_files:
-                logger.info(f"查询转移失败和已处理的文件，时间阈值: {cutoff_time_str}")
-            else:
-                logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str}")
+            logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str}")
             
             # 创建数据库会话
             db = SessionFactory()
@@ -429,23 +406,7 @@ class FileSweeper(_PluginBase):
                 
                 logger.info(f"找到 {len(failed_transfers)} 条转移失败记录")
                 
-                # 如果开启了清理已处理文件，查询所有成功处理的记录
-                processed_transfers = []
-                if self._clean_processed_files:
-                    processed_transfers = db.query(TransferHistory).filter(
-                        and_(
-                            TransferHistory.status == True,  # 转移成功
-                            TransferHistory.date <= cutoff_time_str  # 超过指定时间
-                        )
-                    ).all()
-                    logger.info(f"找到 {len(processed_transfers)} 条已成功处理的记录")
-                
-                # 处理所有需要清理的记录（失败记录 + 已处理记录）
-                all_transfers = list(failed_transfers)
-                if self._clean_processed_files:
-                    all_transfers.extend(processed_transfers)
-                
-                for transfer in all_transfers:
+                for transfer in failed_transfers:
                     try:
                         # 删除源文件
                         if transfer.src_fileitem:
@@ -456,19 +417,13 @@ class FileSweeper(_PluginBase):
                                 # 读取大小（如有）用于统计
                                 file_size = int(src_fileitem_data.get("size", 0)) if isinstance(src_fileitem_data.get("size", 0), (int, float)) else 0
 
-                                # 判断是否为成功处理的记录
-                                is_processed = transfer.status == True
-                                
                                 if not self._dry_run:
                                     # 使用 StorageChain 删除文件（支持各类存储后端）
                                     storage_chain = StorageChain()
                                     success = storage_chain.delete_media_file(src_fileitem)
 
                                     if success:
-                                        if is_processed:
-                                            logger.info(f"删除已处理文件的源文件: {src_fileitem.path}")
-                                        else:
-                                            logger.info(f"删除转移失败文件: {src_fileitem.path}")
+                                        logger.info(f"删除转移失败文件: {src_fileitem.path}")
 
                                         # 发送下载文件删除事件
                                         eventmanager.send_event(
@@ -479,34 +434,29 @@ class FileSweeper(_PluginBase):
                                             }
                                         )
 
-                                        # 只有失败记录才删除转移记录，成功记录保留
-                                        if not is_processed:
-                                            TransferHistory.delete(db, transfer.id)
-                                            logger.debug(f"删除转移失败记录: {transfer.id}")
+                                        # 删除转移记录（仅在删除成功后）
+                                        TransferHistory.delete(db, transfer.id)
 
                                         cleaned_files.append({
                                             "path": src_fileitem.path,
                                             "size": file_size,
                                             "modified": transfer.date,
                                             "title": transfer.title,
-                                            "type": "processed_file" if is_processed else "failed_transfer"
+                                            "type": "failed_transfer"
                                         })
                                         total_size += file_size
                                     else:
-                                        error_msg = f"删除文件失败: {src_fileitem.path}"
+                                        error_msg = f"删除转移失败文件失败: {src_fileitem.path}"
                                         logger.error(error_msg)
                                         errors.append(error_msg)
                                 else:
-                                    if is_processed:
-                                        logger.info(f"[预览] 将删除已处理文件的源文件: {src_fileitem.path}")
-                                    else:
-                                        logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
+                                    logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
                                     cleaned_files.append({
                                         "path": src_fileitem.path,
                                         "size": file_size,
                                         "modified": transfer.date,
                                         "title": transfer.title,
-                                        "type": "processed_file" if is_processed else "failed_transfer"
+                                        "type": "failed_transfer"
                                     })
                                     total_size += file_size
                             else:
@@ -574,21 +524,9 @@ class FileSweeper(_PluginBase):
             errors: 错误列表
         """
         try:
-            # 统计已处理文件和失败文件
-            processed_files = [f for f in cleaned_files if f.get("type") == "processed_file"]
-            failed_files = [f for f in cleaned_files if f.get("type") == "failed_transfer"]
-            
             # 构建通知消息
-            if self._clean_processed_files:
-                message = f"文件清理任务完成\n\n"
-            else:
-                message = f"转移失败文件清理任务完成\n\n"
-            
+            message = f"转移失败文件清理任务完成\n\n"
             message += f"清理文件: {len(cleaned_files)} 个\n"
-            if self._clean_processed_files and processed_files:
-                message += f"  - 已处理文件: {len(processed_files)} 个\n"
-            if failed_files:
-                message += f"  - 失败文件: {len(failed_files)} 个\n"
             message += f"清理目录: {len(cleaned_dirs)} 个\n"
             message += f"释放空间: {self._format_size(total_size)}\n"
             
@@ -602,7 +540,7 @@ class FileSweeper(_PluginBase):
             notification = Notification(
                 channel="FileSweeper",
                 mtype=NotificationType.Manual,
-                title="文件清理完成" if self._clean_processed_files else "转移失败文件清理完成",
+                title="转移失败文件清理完成",
                 text=message,
                 image=""
             )
