@@ -28,7 +28,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.8"
+    plugin_version = "1.9"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -47,7 +47,8 @@ class EmbyEpisodeSync(_PluginBase):
         self._send_notification = config.get("send_notification", True) if config else True
         self._onlyonce = config.get("onlyonce", False) if config else False
         self._auto_create_subscribe = config.get("auto_create_subscribe", False) if config else False
-        self._test_limit = config.get("test_limit", 5) if config else 5  # 测试模式限制数量
+        self._test_mode = config.get("test_mode", False) if config else False
+        self._test_limit = config.get("test_limit", 10) if config else 10  # 测试模式限制数量
         
         # 初始化帮助类
         self._mediaserver_helper = MediaServerHelper()
@@ -66,7 +67,8 @@ class EmbyEpisodeSync(_PluginBase):
                 func=self._execute_sync,
                 trigger='date',
                 run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                name="Emby集数同步"
+                name="Emby集数同步",
+                kwargs={"test_mode": self._test_mode, "test_limit": self._test_limit}
             )
             
             # 启动任务
@@ -197,6 +199,20 @@ class EmbyEpisodeSync(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "test_mode",
+                                            "label": "测试模式",
+                                            "color": "info"
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -212,7 +228,7 @@ class EmbyEpisodeSync(_PluginBase):
                                         "props": {
                                             "model": "test_limit",
                                             "label": "测试模式限制数量",
-                                            "placeholder": "5",
+                                            "placeholder": "10",
                                             "type": "number",
                                             "hint": "测试运行时只处理前N个订阅/剧集，用于小规模测试"
                                         }
@@ -283,7 +299,8 @@ class EmbyEpisodeSync(_PluginBase):
             "send_notification": True,
             "onlyonce": False,
             "auto_create_subscribe": False,
-            "test_limit": 5
+            "test_mode": False,
+            "test_limit": 10
         }
     
     def get_page(self) -> list:
@@ -378,6 +395,7 @@ class EmbyEpisodeSync(_PluginBase):
             "send_notification": self._send_notification,
             "onlyonce": self._onlyonce,
             "auto_create_subscribe": self._auto_create_subscribe,
+            "test_mode": self._test_mode,
             "test_limit": self._test_limit
         })
     
@@ -438,7 +456,7 @@ class EmbyEpisodeSync(_PluginBase):
         try:
             # 获取测试限制数量（优先使用请求参数，否则使用配置）
             test_limit = request_data.get("test_limit", self._test_limit) if request_data else self._test_limit
-            test_limit = int(test_limit) if test_limit else 5
+            test_limit = int(test_limit) if test_limit else 10
             
             logger.info(f"开始测试运行Emby集数同步任务（限制处理数量: {test_limit}）")
             
@@ -456,7 +474,7 @@ class EmbyEpisodeSync(_PluginBase):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
     
-    def _execute_sync(self, test_mode: bool = False, test_limit: int = 5) -> Dict[str, Any]:
+    def _execute_sync(self, test_mode: bool = False, test_limit: int = 10) -> Dict[str, Any]:
         """
         执行Emby集数同步任务
         
@@ -546,8 +564,10 @@ class EmbyEpisodeSync(_PluginBase):
             skipped_count = 0
             error_count = 0
             created_count = 0
+            cancelled_count = 0
             updated_subscribes = []
             created_subscribes = []
+            cancelled_subscribes = []
             
             for subscribe in tv_subscribes:
                 try:
@@ -586,6 +606,37 @@ class EmbyEpisodeSync(_PluginBase):
                             logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到集数")
                         skipped_count += 1
                         continue
+                    
+                    # 计算是否已经全集集齐（使用TMDB总集数）
+                    total_episode_count = 0
+                    try:
+                        mediainfo = self._media_chain.recognize_media(mtype=MediaType.TV, tmdbid=subscribe.tmdbid)
+                        if mediainfo and mediainfo.seasons:
+                            seas = mediainfo.seasons.get(subscribe.season)
+                            if seas:
+                                total_episode_count = len(seas)
+                    except Exception as _:
+                        pass
+                    
+                    if total_episode_count > 0 and len(emby_episodes) >= total_episode_count:
+                        # 已全集且非洗版，若仍为订阅中则自动取消（置为暂停S）
+                        if (subscribe.state in ['N', 'R', 'P']) and not subscribe.best_version:
+                            logger.info(f"订阅 {subscribe.name} S{subscribe.season:02d} 已全集({len(emby_episodes)}/{total_episode_count})，自动取消订阅")
+                            payload = {
+                                "state": 'S',
+                                "lack_episode": 0,
+                                "total_episode": subscribe.total_episode or total_episode_count
+                            }
+                            subscribe_oper.update(subscribe.id, payload)
+                            cancelled_count += 1
+                            cancelled_subscribes.append({
+                                "name": subscribe.name,
+                                "season": subscribe.season,
+                                "tmdb_id": subscribe.tmdbid,
+                                "total": total_episode_count
+                            })
+                            # 已取消则不再更新note
+                            continue
                     
                     # 使用Emby的集数作为新的已下载集数（去重并排序）
                     emby_episodes_set = set(emby_episodes)
@@ -648,21 +699,23 @@ class EmbyEpisodeSync(_PluginBase):
                 logger.info(f"创建了 {created_count} 个缺失的订阅")
             
             # 发送通知
-            if self._send_notification and (updated_count > 0 or created_count > 0):
+            if self._send_notification and (updated_count > 0 or created_count > 0 or cancelled_count > 0):
                 self._send_sync_notification(
                     updated_count, skipped_count, error_count, updated_subscribes,
-                    created_count, created_subscribes
+                    created_count, created_subscribes, cancelled_count, cancelled_subscribes
                 )
             
             result = {
                 "success": error_count == 0,
-                "message": f"Emby集数同步完成 - 更新: {updated_count}, 创建: {created_count}, 跳过: {skipped_count}, 错误: {error_count}",
+                "message": f"Emby集数同步完成 - 更新: {updated_count}, 创建: {created_count}, 取消: {cancelled_count}, 跳过: {skipped_count}, 错误: {error_count}",
                 "updated_count": updated_count,
                 "created_count": created_count,
+                "cancelled_count": cancelled_count,
                 "skipped_count": skipped_count,
                 "error_count": error_count,
                 "updated_subscribes": updated_subscribes,
-                "created_subscribes": created_subscribes
+                "created_subscribes": created_subscribes,
+                "cancelled_subscribes": cancelled_subscribes
             }
             
             logger.info(f"=== Emby集数同步任务完成 ===")
@@ -681,7 +734,7 @@ class EmbyEpisodeSync(_PluginBase):
                 "error_count": 1
             }
     
-    def _get_all_emby_series(self, emby, test_mode: bool = False, test_limit: int = 5) -> Dict[str, Dict]:
+    def _get_all_emby_series(self, emby, test_mode: bool = False, test_limit: int = 10) -> Dict[str, Dict]:
         """
         从Emby获取所有剧集及其季和集数信息
         
@@ -813,7 +866,7 @@ class EmbyEpisodeSync(_PluginBase):
     
     def _check_and_create_missing_subscribes(self, emby, subscribe_oper: SubscribeOper, 
                                             tv_subscribes: List, test_mode: bool = False, 
-                                            test_limit: int = 5) -> Dict[str, Any]:
+                                            test_limit: int = 10) -> Dict[str, Any]:
         """
         检查并创建缺失的订阅
         先从Emby获取所有剧集，然后与MoviePilot订阅对比，找出差异
@@ -1032,7 +1085,8 @@ class EmbyEpisodeSync(_PluginBase):
     
     def _send_sync_notification(self, updated_count: int, skipped_count: int, 
                                error_count: int, updated_subscribes: List[Dict],
-                               created_count: int = 0, created_subscribes: List[Dict] = None):
+                               created_count: int = 0, created_subscribes: List[Dict] = None,
+                               cancelled_count: int = 0, cancelled_subscribes: List[Dict] = None):
         """
         发送同步通知
         
@@ -1043,15 +1097,21 @@ class EmbyEpisodeSync(_PluginBase):
             updated_subscribes: 更新的订阅列表
             created_count: 创建的订阅数量
             created_subscribes: 创建的订阅列表
+            cancelled_count: 取消的订阅数量
+            cancelled_subscribes: 取消的订阅列表
         """
         if created_subscribes is None:
             created_subscribes = []
+        if cancelled_subscribes is None:
+            cancelled_subscribes = []
         try:
             # 构建通知消息
             message = f"Emby集数同步任务完成\n\n"
             message += f"更新订阅: {updated_count} 个\n"
             if created_count > 0:
                 message += f"创建订阅: {created_count} 个\n"
+            if cancelled_count > 0:
+                message += f"取消订阅: {cancelled_count} 个\n"
             message += f"跳过订阅: {skipped_count} 个\n"
             
             if error_count > 0:
@@ -1081,6 +1141,13 @@ class EmbyEpisodeSync(_PluginBase):
                 
                 if len(created_subscribes) > 10:
                     message += f"  ... 还有 {len(created_subscribes) - 10} 个订阅已创建\n"
+            
+            if cancelled_subscribes:
+                message += f"\n取消的订阅:\n"
+                for sub_info in cancelled_subscribes[:10]:
+                    message += f"  {sub_info['name']} S{sub_info['season']:02d} - 全集完成({sub_info.get('total')})\n"
+                if len(cancelled_subscribes) > 10:
+                    message += f"  ... 还有 {len(cancelled_subscribes) - 10} 个订阅已取消\n"
             
             # 发送通知
             notification = Notification(
