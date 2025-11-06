@@ -487,6 +487,11 @@ class EmbyEpisodeSync(_PluginBase):
         """
         try:
             mode_str = "测试模式" if test_mode else "正常模式"
+            # 强制转换 test_limit 为整数，避免 int 与 str 比较
+            try:
+                test_limit = int(test_limit)
+            except Exception:
+                test_limit = 10
             logger.info(f"=== 开始执行Emby集数同步任务 ({mode_str}) ===")
             if test_mode:
                 logger.info(f"测试模式限制数量: {test_limit}")
@@ -764,6 +769,12 @@ class EmbyEpisodeSync(_PluginBase):
         
         try:
             logger.info("=== 开始从Emby获取所有剧集 ===")
+            
+            # 强制转换 test_limit 为整数
+            try:
+                test_limit = int(test_limit)
+            except Exception:
+                test_limit = 10
             
             if not emby._host or not emby._apikey:
                 logger.warning("Emby配置不完整，无法获取剧集列表")
