@@ -27,7 +27,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.2"
+    plugin_version = "1.3"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -389,20 +389,23 @@ class EmbyEpisodeSync(_PluginBase):
             
             for subscribe in tv_subscribes:
                 try:
+                    logger.debug(f"处理订阅: {subscribe.name} S{subscribe.season:02d} (TMDB ID: {subscribe.tmdbid})")
+                    
                     # 跳过洗版订阅
                     if subscribe.best_version:
+                        logger.debug(f"订阅 {subscribe.name} S{subscribe.season:02d} 是洗版订阅，跳过")
                         skipped_count += 1
                         continue
                     
                     # 获取订阅的已下载集数（允许为空，空数组时也需要从Emby恢复）
                     current_episodes = subscribe.note or []
                     
-                    # 查询Emby中的集数
+                    # 查询Emby中的集数（不传season参数，获取所有季的数据，确保能获取到所有季）
                     emby_item_id, emby_season_episodes = emby.get_tv_episodes(
                         title=subscribe.name,
                         year=subscribe.year,
                         tmdb_id=subscribe.tmdbid,
-                        season=subscribe.season
+                        season=None  # 不传season，获取所有季的数据
                     )
                     
                     if not emby_item_id or not emby_season_episodes:
@@ -413,7 +416,12 @@ class EmbyEpisodeSync(_PluginBase):
                     # 获取对应季的集数列表
                     emby_episodes = emby_season_episodes.get(subscribe.season, [])
                     if not emby_episodes:
-                        logger.debug(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到集数")
+                        # 如果指定季没有数据，但Emby中有其他季的数据，记录详细信息以便调试
+                        available_seasons = sorted(list(emby_season_episodes.keys())) if emby_season_episodes else []
+                        if available_seasons:
+                            logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到集数。Emby中可用的季: {available_seasons}，可能订阅的季号配置不正确")
+                        else:
+                            logger.debug(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到集数")
                         skipped_count += 1
                         continue
                     

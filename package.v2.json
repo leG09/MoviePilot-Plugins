@@ -102,11 +102,12 @@
     "name": "Emby集数同步",
     "description": "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集",
     "labels": "Emby,订阅,同步",
-    "version": "1.2",
+    "version": "1.3",
     "icon": "Emby_A.png",
     "author": "leGO9",
     "level": 1,
     "history": {
+      "v1.3": "优化Emby集数同步功能，添加一次性执行功能",
       "v1.2": "优化Emby集数同步功能，添加洗版订阅跳过功能",
       "v1.1": "优化Emby集数同步功能，添加新增和移除集数显示",
       "v1.0": "首个版本，实现Emby集数同步功能"
