@@ -28,7 +28,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.9.2"
+    plugin_version = "2.0"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -860,12 +860,21 @@ class EmbyEpisodeSync(_PluginBase):
                             
                             total_count += 1
                             
+                            # 测试模式：达到上限后立即停止收集
+                            if test_mode and len(emby_series) >= test_limit:
+                                logger.info(f"测试模式：已收集 {len(emby_series)} 个剧集，提前结束采集")
+                                break
+                            
                         except (ValueError, KeyError) as e:
                             logger.debug(f"处理剧集项时出错: {str(e)}")
                             continue
                         except Exception as e:
                             logger.warning(f"处理剧集项时发生错误: {str(e)}")
                             continue
+                    
+                    # 若测试模式达到上限，结束外层循环
+                    if test_mode and len(emby_series) >= test_limit:
+                        break
                     
                     # 检查是否还有更多数据
                     start_index += len(items)
