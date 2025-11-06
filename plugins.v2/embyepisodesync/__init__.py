@@ -13,6 +13,7 @@ from app.schemas.types import EventType, MediaType
 from app.log import logger
 from app.db.subscribe_oper import SubscribeOper
 from app.helper.mediaserver import MediaServerHelper
+from app.chain.media import MediaChain
 try:
     from typing_extensions import Annotated
 except ImportError:
@@ -27,7 +28,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -45,9 +46,11 @@ class EmbyEpisodeSync(_PluginBase):
         self._mediaserver_name = config.get("mediaserver_name", "") if config else ""
         self._send_notification = config.get("send_notification", True) if config else True
         self._onlyonce = config.get("onlyonce", False) if config else False
+        self._auto_create_subscribe = config.get("auto_create_subscribe", False) if config else False
         
         # 初始化帮助类
         self._mediaserver_helper = MediaServerHelper()
+        self._media_chain = MediaChain()
         
         logger.info(f"EmbyEpisodeSync插件初始化完成，启用状态: {self._enabled}")
         if self._enabled:
@@ -172,6 +175,20 @@ class EmbyEpisodeSync(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "auto_create_subscribe",
+                                            "label": "自动创建缺失订阅",
+                                            "color": "success"
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -235,7 +252,8 @@ class EmbyEpisodeSync(_PluginBase):
             "cron": "0 3 * * *",
             "mediaserver_name": "",
             "send_notification": True,
-            "onlyonce": False
+            "onlyonce": False,
+            "auto_create_subscribe": False
         }
     
     def get_page(self) -> list:
@@ -275,7 +293,8 @@ class EmbyEpisodeSync(_PluginBase):
             "cron": self._cron,
             "mediaserver_name": self._mediaserver_name,
             "send_notification": self._send_notification,
-            "onlyonce": self._onlyonce
+            "onlyonce": self._onlyonce,
+            "auto_create_subscribe": self._auto_create_subscribe
         })
     
     @eventmanager.register(EventType.PluginAction)
@@ -396,7 +415,12 @@ class EmbyEpisodeSync(_PluginBase):
             updated_count = 0
             skipped_count = 0
             error_count = 0
+            created_count = 0
             updated_subscribes = []
+            created_subscribes = []
+            
+            # 用于跟踪已处理的剧集（避免重复处理）
+            processed_series = {}  # {tmdb_id: {season: subscribe}}
             
             for subscribe in tv_subscribes:
                 try:
@@ -423,6 +447,11 @@ class EmbyEpisodeSync(_PluginBase):
                         logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到 (TMDB ID: {subscribe.tmdbid})")
                         skipped_count += 1
                         continue
+                    
+                    # 记录已处理的剧集和季
+                    if subscribe.tmdbid not in processed_series:
+                        processed_series[subscribe.tmdbid] = {}
+                    processed_series[subscribe.tmdbid][subscribe.season] = subscribe
                     
                     # 获取对应季的集数列表
                     emby_episodes = emby_season_episodes.get(subscribe.season, [])
@@ -486,17 +515,32 @@ class EmbyEpisodeSync(_PluginBase):
                     logger.error(error_msg)
                     error_count += 1
             
+            # 检查并创建缺失的订阅
+            if self._auto_create_subscribe:
+                logger.info("=== 开始检查并创建缺失的订阅 ===")
+                created_result = self._check_and_create_missing_subscribes(
+                    emby, subscribe_oper, processed_series
+                )
+                created_count = created_result.get("created_count", 0)
+                created_subscribes = created_result.get("created_subscribes", [])
+                logger.info(f"创建了 {created_count} 个缺失的订阅")
+            
             # 发送通知
-            if self._send_notification and updated_count > 0:
-                self._send_sync_notification(updated_count, skipped_count, error_count, updated_subscribes)
+            if self._send_notification and (updated_count > 0 or created_count > 0):
+                self._send_sync_notification(
+                    updated_count, skipped_count, error_count, updated_subscribes,
+                    created_count, created_subscribes
+                )
             
             result = {
                 "success": error_count == 0,
-                "message": f"Emby集数同步完成 - 更新: {updated_count}, 跳过: {skipped_count}, 错误: {error_count}",
+                "message": f"Emby集数同步完成 - 更新: {updated_count}, 创建: {created_count}, 跳过: {skipped_count}, 错误: {error_count}",
                 "updated_count": updated_count,
+                "created_count": created_count,
                 "skipped_count": skipped_count,
                 "error_count": error_count,
-                "updated_subscribes": updated_subscribes
+                "updated_subscribes": updated_subscribes,
+                "created_subscribes": created_subscribes
             }
             
             logger.info(f"=== Emby集数同步任务完成 ===")
@@ -515,8 +559,119 @@ class EmbyEpisodeSync(_PluginBase):
                 "error_count": 1
             }
     
+    def _check_and_create_missing_subscribes(self, emby, subscribe_oper: SubscribeOper, 
+                                            processed_series: Dict) -> Dict[str, Any]:
+        """
+        检查并创建缺失的订阅
+        
+        Args:
+            emby: Emby实例
+            subscribe_oper: 订阅操作类
+            processed_series: 已处理的剧集字典 {tmdb_id: {season: subscribe}}
+            
+        Returns:
+            Dict: 创建结果
+        """
+        created_count = 0
+        created_subscribes = []
+        
+        try:
+            # 遍历所有已处理的剧集
+            for tmdb_id, seasons_dict in processed_series.items():
+                try:
+                    # 获取第一个订阅作为参考（用于获取剧集信息）
+                    first_subscribe = list(seasons_dict.values())[0]
+                    
+                    # 查询Emby中该剧集的所有季和集数
+                    emby_item_id, emby_season_episodes = emby.get_tv_episodes(
+                        title=first_subscribe.name,
+                        year=first_subscribe.year,
+                        tmdb_id=tmdb_id,
+                        season=None  # 获取所有季的数据
+                    )
+                    
+                    if not emby_item_id or not emby_season_episodes:
+                        logger.debug(f"剧集 {first_subscribe.name} (TMDB: {tmdb_id}) 在Emby中未找到，跳过创建订阅")
+                        continue
+                    
+                    # 获取Emby中所有有集数的季
+                    emby_seasons = set(emby_season_episodes.keys())
+                    # 获取已有订阅的季
+                    existing_seasons = set(seasons_dict.keys())
+                    
+                    # 找出缺失的季（Emby中有但订阅中没有的）
+                    missing_seasons = emby_seasons - existing_seasons
+                    
+                    if not missing_seasons:
+                        logger.debug(f"剧集 {first_subscribe.name} (TMDB: {tmdb_id}) 所有季都有订阅")
+                        continue
+                    
+                    logger.info(f"剧集 {first_subscribe.name} (TMDB: {tmdb_id}) 发现缺失的季: {sorted(missing_seasons)}")
+                    
+                    # 通过TMDB ID识别媒体信息
+                    mediainfo = self._media_chain.recognize_media(
+                        mtype=MediaType.TV,
+                        tmdbid=tmdb_id
+                    )
+                    
+                    if not mediainfo:
+                        logger.warning(f"无法通过TMDB ID {tmdb_id} 识别媒体信息，跳过创建订阅")
+                        continue
+                    
+                    # 为每个缺失的季创建订阅
+                    for season in missing_seasons:
+                        try:
+                            # 获取该季的集数
+                            emby_episodes = emby_season_episodes.get(season, [])
+                            if not emby_episodes:
+                                logger.debug(f"剧集 {first_subscribe.name} S{season:02d} 在Emby中没有集数，跳过创建订阅")
+                                continue
+                            
+                            # 去重并排序
+                            episodes_list = sorted(list(set(emby_episodes)))
+                            
+                            logger.info(f"创建缺失订阅: {mediainfo.title_year} S{season:02d} (TMDB: {tmdb_id})")
+                            logger.info(f"  Emby中的集数: {episodes_list}")
+                            
+                            # 创建订阅
+                            subscribe_id, message = subscribe_oper.add(
+                                mediainfo=mediainfo,
+                                season=season,
+                                note=episodes_list,  # 直接设置已下载的集数
+                                state='N'  # 新建状态
+                            )
+                            
+                            logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
+                            
+                            created_count += 1
+                            created_subscribes.append({
+                                "name": mediainfo.title,
+                                "season": season,
+                                "tmdb_id": tmdb_id,
+                                "episodes": episodes_list
+                            })
+                            
+                        except Exception as e:
+                            error_msg = f"创建订阅 {mediainfo.title_year} S{season:02d} 时发生错误: {str(e)}"
+                            logger.error(error_msg)
+                            continue
+                            
+                except Exception as e:
+                    error_msg = f"处理剧集 {tmdb_id} 时发生错误: {str(e)}"
+                    logger.error(error_msg)
+                    continue
+            
+        except Exception as e:
+            logger.error(f"检查并创建缺失订阅时发生错误: {str(e)}")
+        
+        return {
+            "created_count": created_count,
+            "created_subscribes": created_subscribes
+        }
+    
     def _send_sync_notification(self, updated_count: int, skipped_count: int, 
-                               error_count: int, updated_subscribes: List[Dict]):
+                               error_count: int, updated_subscribes: List[Dict],
+                               created_count: int = 0, created_subscribes: List[Dict] = None):
         """
         发送同步通知
         
@@ -525,11 +680,17 @@ class EmbyEpisodeSync(_PluginBase):
             skipped_count: 跳过的订阅数量
             error_count: 错误的订阅数量
             updated_subscribes: 更新的订阅列表
+            created_count: 创建的订阅数量
+            created_subscribes: 创建的订阅列表
         """
+        if created_subscribes is None:
+            created_subscribes = []
         try:
             # 构建通知消息
             message = f"Emby集数同步任务完成\n\n"
             message += f"更新订阅: {updated_count} 个\n"
+            if created_count > 0:
+                message += f"创建订阅: {created_count} 个\n"
             message += f"跳过订阅: {skipped_count} 个\n"
             
             if error_count > 0:
@@ -548,6 +709,17 @@ class EmbyEpisodeSync(_PluginBase):
                 
                 if len(updated_subscribes) > 10:
                     message += f"  ... 还有 {len(updated_subscribes) - 10} 个订阅已更新\n"
+            
+            if created_subscribes:
+                message += f"\n创建的订阅:\n"
+                for sub_info in created_subscribes[:10]:  # 最多显示10个
+                    episodes_str = f"集数: {', '.join(map(str, sub_info['episodes'][:10]))}"
+                    if len(sub_info['episodes']) > 10:
+                        episodes_str += f" 等{len(sub_info['episodes'])}集"
+                    message += f"  {sub_info['name']} S{sub_info['season']:02d} - {episodes_str}\n"
+                
+                if len(created_subscribes) > 10:
+                    message += f"  ... 还有 {len(created_subscribes) - 10} 个订阅已创建\n"
             
             # 发送通知
             notification = Notification(
