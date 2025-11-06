@@ -28,7 +28,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -563,7 +563,7 @@ class EmbyEpisodeSync(_PluginBase):
                 subscribe_groups[key].append(f"S{s.season:02d}")
             
             for name, seasons in subscribe_groups.items():
-                logger.info(f"订阅: {name} - 季: {', '.join(seasons)}")
+                logger.debug(f"订阅: {name} - 季: {', '.join(seasons)}")
             
             updated_count = 0
             skipped_count = 0
@@ -782,12 +782,14 @@ class EmbyEpisodeSync(_PluginBase):
             
             # 获取所有Series类型的项目
             url = f"{emby._host}emby/Items"
+            # 正式模式下减少每页数量，避免单次响应过大导致阻塞
+            page_limit = 1000 if test_mode else 200
             params = {
                 "IncludeItemTypes": "Series",
                 "Recursive": "true",
                 "Fields": "ProviderIds,ProductionYear",
                 "api_key": emby._apikey,
-                "Limit": 1000  # 每次最多1000条
+                "Limit": page_limit  # 分页大小：测试模式1000，正式模式200
             }
             
             start_index = 0
@@ -810,7 +812,7 @@ class EmbyEpisodeSync(_PluginBase):
                     if not items:
                         break
                     
-                    logger.info(f"获取到 {len(items)} 个剧集 (总计: {total_record_count})")
+                    logger.debug(f"获取到 {len(items)} 个剧集 (本页 {page_limit}/ 总计: {total_record_count})，起始索引: {start_index}")
                     
                     for item in items:
                         try:
@@ -878,6 +880,7 @@ class EmbyEpisodeSync(_PluginBase):
                     
                     # 检查是否还有更多数据
                     start_index += len(items)
+                    logger.debug(f"分页进度：已收集 {len(emby_series)}/{total_record_count}（下一页起始索引: {start_index}）")
                     if start_index >= total_record_count:
                         break
                     
@@ -1011,6 +1014,20 @@ class EmbyEpisodeSync(_PluginBase):
                                 state='N'
                             )
                             
+                            # 校正总集数与缺失集，避免显示负数
+                            try:
+                                total_episode_for_save = int(total_episode_count) if total_episode_count else 0
+                                if total_episode_for_save < len(episodes_list):
+                                    total_episode_for_save = len(episodes_list)
+                                lack_episode_for_save = max(total_episode_for_save - len(episodes_list), 0)
+                                subscribe_oper.update(subscribe_id, {
+                                    "total_episode": total_episode_for_save,
+                                    "lack_episode": lack_episode_for_save,
+                                    "note": episodes_list
+                                })
+                            except Exception:
+                                pass
+                            
                             logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
                             
                             created_count += 1
@@ -1093,6 +1110,20 @@ class EmbyEpisodeSync(_PluginBase):
                                 note=episodes_list,
                                 state='N'
                             )
+                            
+                            # 校正总集数与缺失集，避免显示负数
+                            try:
+                                total_episode_for_save = int(total_episode_count) if total_episode_count else 0
+                                if total_episode_for_save < len(episodes_list):
+                                    total_episode_for_save = len(episodes_list)
+                                lack_episode_for_save = max(total_episode_for_save - len(episodes_list), 0)
+                                subscribe_oper.update(subscribe_id, {
+                                    "total_episode": total_episode_for_save,
+                                    "lack_episode": lack_episode_for_save,
+                                    "note": episodes_list
+                                })
+                            except Exception:
+                                pass
                             
                             logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
                             
