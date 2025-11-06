@@ -49,7 +49,7 @@ class CloudDriveWebhook(_PluginBase):
     plugin_desc = "接收文件路径，通过gRPC直接调用CloudDrive API刷新上一级目录，支持多目标文件同步"
     plugin_icon = "clouddrive.png"
     plugin_color = "#00BFFF"
-    plugin_version = "2.9"
+    plugin_version = "3.0"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "clouddrivewebhook"
@@ -1855,7 +1855,7 @@ class CloudDriveWebhook(_PluginBase):
 
     def _copy_file_via_grpc(self, source_path: str, target_path: str) -> dict:
         """
-        通过gRPC复制文件（使用官方支持的Backup API）
+        通过gRPC复制文件（使用CopyFile RPC）
         
         Args:
             source_path: 源文件路径
@@ -1874,202 +1874,60 @@ class CloudDriveWebhook(_PluginBase):
             if not stub:
                 return {"success": False, "message": "无法创建gRPC连接"}
             
+            # 导入protobuf消息
+            try:
+                import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+            except ImportError as e:
+                logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
+                return {"success": False, "message": "未找到CloudDrive protobuf模块"}
+            
             # 获取目标目录
             target_dir = str(Path(target_path).parent)
             
             logger.info(f"开始文件复制操作: {source_path} => {target_dir}")
-            logger.info("使用官方支持的Backup API进行文件复制")
+            logger.info("使用CopyFile RPC进行文件复制")
             
-            # 直接使用Backup API，跳过CopyFile API的尝试
-            return self._copy_file_via_backup_api(source_path, target_dir)
-                
-        except Exception as e:
-            error_msg = f"复制文件时发生错误：{str(e)}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
-
-    def _build_copy_file_request(self, source_path: str, target_dir: str) -> bytes:
-        """
-        构建CopyFile请求数据
-        
-        Args:
-            source_path: 源文件路径
-            target_dir: 目标目录路径
-            
-        Returns:
-            bytes: 请求数据
-        """
-        try:
-            # 尝试使用简化的方法，直接构建类似curl请求的格式
-            # 先尝试简单的方法
-            simple_result = self._build_simple_copy_request(source_path, target_dir)
-            if simple_result:
-                logger.info("使用简化的protobuf构建方法")
-                return simple_result
-            
-            # 如果简单方法失败，使用标准protobuf方法
-            logger.info("使用标准protobuf构建方法")
-            
-            # 构建protobuf消息
-            # 字段1: 源文件路径 (tag=1, wire_type=2=string)
-            source_bytes = source_path.encode('utf-8')
-            source_field = b'\x0A' + self._encode_varint(len(source_bytes)) + source_bytes
-            
-            # 字段2: 目标目录路径 (tag=2, wire_type=2=string) 
-            target_bytes = target_dir.encode('utf-8')
-            target_field = b'\x12' + self._encode_varint(len(target_bytes)) + target_bytes
-            
-            # 字段8: 标志位 (tag=8, wire_type=0=varint, value=1)
-            flag_field = b'(\x01'
-            
-            # 组合消息
-            message = source_field + target_field + flag_field
-            
-            # 添加gRPC前缀（4字节长度，大端序）
-            length_bytes = len(message).to_bytes(4, 'big')
-            
-            logger.info(f"构建的protobuf消息长度: {len(message)}")
-            logger.info(f"源路径: {source_path} (长度: {len(source_bytes)})")
-            logger.info(f"目标目录: {target_dir} (长度: {len(target_bytes)})")
-            logger.info(f"protobuf字段1: {source_field.hex()}")
-            logger.info(f"protobuf字段2: {target_field.hex()}")
-            logger.info(f"protobuf字段8: {flag_field.hex()}")
-            logger.info(f"完整消息: {(length_bytes + message).hex()}")
-            
-            return length_bytes + message
-            
-        except Exception as e:
-            logger.error(f"构建CopyFile请求失败: {str(e)}")
-            return b''
-
-    def _build_simple_copy_request(self, source_path: str, target_dir: str) -> bytes:
-        """
-        使用简化的方法构建CopyFile请求
-        
-        Args:
-            source_path: 源文件路径
-            target_dir: 目标目录路径
-            
-        Returns:
-            bytes: 请求数据
-        """
-        try:
-            # 直接使用类似curl请求的格式
-            # 字段1: 源文件路径
-            source_field = b'\x0A' + len(source_path).to_bytes(1, 'big') + source_path.encode('utf-8')
-            
-            # 字段2: 目标目录路径
-            target_field = b'\x12' + len(target_dir).to_bytes(1, 'big') + target_dir.encode('utf-8')
-            
-            # 字段8: 标志位
-            flag_field = b'(\x01'
-            
-            # 组合消息
-            message = source_field + target_field + flag_field
-            
-            # 添加gRPC前缀（4字节长度）
-            length_bytes = len(message).to_bytes(4, 'big')
-            
-            logger.info(f"简化方法 - 消息长度: {len(message)}")
-            logger.info(f"简化方法 - 完整消息: {(length_bytes + message).hex()}")
-            
-            return length_bytes + message
-            
-        except Exception as e:
-            logger.warning(f"简化protobuf构建失败: {str(e)}")
-            return b''
-
-    def _encode_varint(self, value: int) -> bytes:
-        """
-        编码varint值
-        
-        Args:
-            value: 要编码的整数值
-            
-        Returns:
-            bytes: 编码后的字节
-        """
-        if value < 0:
-            value = value + (1 << 64)
-        
-        result = bytearray()
-        while value >= 0x80:
-            result.append(0x80 | (value & 0x7F))
-            value >>= 7
-        result.append(value & 0x7F)
-        return bytes(result)
-
-    def _copy_file_via_backup_api(self, source_path: str, target_dir: str) -> dict:
-        """
-        使用Backup API作为CopyFile的替代方案
-        
-        Args:
-            source_path: 源文件路径
-            target_dir: 目标目录路径
-            
-        Returns:
-            dict: 复制结果
-        """
-        try:
-            # 导入protobuf消息
-            import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
-            
-            stub = self._get_grpc_stub()
-            if not stub:
-                return {"success": False, "message": "无法创建gRPC连接"}
-            
-            logger.info(f"使用Backup API复制文件: {source_path} => {target_dir}")
-            
-            # 创建备份配置
-            backup_config = CloudDrive_pb2.Backup(
-                sourcePath=str(Path(source_path).parent),  # 源目录
-                destinations=[
-                    CloudDrive_pb2.BackupDestination(
-                        destinationPath=target_dir,
-                        isEnabled=True
-                    )
-                ],
-                fileBackupRules=[
-                    CloudDrive_pb2.FileBackupRule(
-                        fileNames=Path(source_path).name,  # 只同步这个文件
-                        isEnabled=True,
-                        isBlackList=False,
-                        applyToFolder=False
-                    )
-                ],
-                fileReplaceRule=CloudDrive_pb2.FileReplaceRule.Overwrite,
-                fileDeleteRule=CloudDrive_pb2.FileDeleteRule.Keep,
-                isEnabled=True,
-                fileSystemWatchEnabled=False,
-                walkingThroughIntervalSecs=0,
-                forceWalkingThroughOnStart=True
+            # 创建CopyFile请求
+            copy_request = CloudDrive_pb2.CopyFileRequest(
+                theFilePaths=[source_path],  # 源文件路径列表
+                destPath=target_dir,  # 目标目录路径
+                conflictPolicy=CloudDrive_pb2.CopyFileRequest.ConflictPolicy.Overwrite,  # 冲突时覆盖
+                handleConflictRecursively=False  # 不递归处理冲突
             )
             
             # 创建带token的metadata
             metadata = [('authorization', f'Bearer {self._token}')]
             
-            # 添加备份任务
-            response = stub.BackupAdd(backup_config, metadata=metadata)
-            logger.info("备份任务创建成功，开始执行同步")
+            # 调用CopyFile RPC
+            logger.info(f"调用CopyFile RPC: {source_path} => {target_dir}")
+            response = stub.CopyFile(copy_request, metadata=metadata)
             
-            # 等待一段时间让备份执行
-            time.sleep(2)
-            
-            # 删除临时备份任务
-            try:
-                remove_request = CloudDrive_pb2.StringValue(
-                    value=str(Path(source_path).parent)
-                )
-                stub.BackupRemove(remove_request, metadata=metadata)
-                logger.info("临时备份任务已清理")
-            except Exception as e:
-                logger.warning(f"清理临时备份任务时发生错误: {str(e)}")
-            
-            return {"success": True, "message": "文件复制完成（通过Backup API）"}
-            
+            if response.success:
+                logger.info(f"文件复制成功: {source_path} => {target_dir}")
+                result_files = list(response.resultFilePaths) if response.resultFilePaths else []
+                return {
+                    "success": True,
+                    "message": f"文件复制成功: {response.errorMessage if response.errorMessage else '完成'}",
+                    "result_files": result_files
+                }
+            else:
+                error_msg = response.errorMessage if response.errorMessage else "未知错误"
+                logger.error(f"文件复制失败: {error_msg}")
+                return {
+                    "success": False,
+                    "message": f"文件复制失败: {error_msg}"
+                }
+                
+        except grpc.RpcError as e:
+            error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
         except Exception as e:
-            logger.error(f"Backup API复制失败: {str(e)}")
-            return {"success": False, "message": f"Backup API复制失败: {str(e)}"}
+            error_msg = f"复制文件时发生错误：{str(e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
+            return {"success": False, "message": error_msg}
 
     def _ensure_directory_exists(self, directory_path: str) -> bool:
         """
