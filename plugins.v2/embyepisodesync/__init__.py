@@ -607,6 +607,9 @@ class EmbyEpisodeSync(_PluginBase):
                         skipped_count += 1
                         continue
                     
+                    # 确保集数都是整数类型（Emby可能返回字符串）
+                    emby_episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in emby_episodes]
+                    
                     # 计算是否已经全集集齐（使用TMDB总集数）
                     total_episode_count = 0
                     try:
@@ -618,6 +621,15 @@ class EmbyEpisodeSync(_PluginBase):
                     except Exception as _:
                         pass
                     
+                    # 确保total_episode是整数类型
+                    if subscribe.total_episode:
+                        try:
+                            subscribe_total = int(subscribe.total_episode) if isinstance(subscribe.total_episode, str) else int(subscribe.total_episode)
+                            if subscribe_total > 0:
+                                total_episode_count = subscribe_total if total_episode_count == 0 else total_episode_count
+                        except (ValueError, TypeError):
+                            pass
+                    
                     if total_episode_count > 0 and len(emby_episodes) >= total_episode_count:
                         # 已全集且非洗版，若仍为订阅中则自动取消（置为暂停S）
                         if (subscribe.state in ['N', 'R', 'P']) and not subscribe.best_version:
@@ -625,7 +637,7 @@ class EmbyEpisodeSync(_PluginBase):
                             payload = {
                                 "state": 'S',
                                 "lack_episode": 0,
-                                "total_episode": subscribe.total_episode or total_episode_count
+                                "total_episode": int(total_episode_count)
                             }
                             subscribe_oper.update(subscribe.id, payload)
                             cancelled_count += 1
@@ -633,13 +645,15 @@ class EmbyEpisodeSync(_PluginBase):
                                 "name": subscribe.name,
                                 "season": subscribe.season,
                                 "tmdb_id": subscribe.tmdbid,
-                                "total": total_episode_count
+                                "total": int(total_episode_count)
                             })
                             # 已取消则不再更新note
                             continue
                     
                     # 使用Emby的集数作为新的已下载集数（去重并排序）
                     emby_episodes_set = set(emby_episodes)
+                    # 确保current_episodes也是整数类型
+                    current_episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in current_episodes] if current_episodes else []
                     current_episodes_set = set(current_episodes)
                     new_episodes = sorted(list(emby_episodes_set))
                     
@@ -814,12 +828,13 @@ class EmbyEpisodeSync(_PluginBase):
                                 logger.debug(f"剧集 {name} (TMDB: {tmdb_id}) 无法获取集数信息")
                                 continue
                             
-                            # 只记录有集数的季
-                            seasons_with_episodes = {
-                                season: episodes 
-                                for season, episodes in emby_season_episodes.items() 
-                                if episodes
-                            }
+                            # 只记录有集数的季，并确保集数都是整数类型
+                            seasons_with_episodes = {}
+                            for season, episodes in emby_season_episodes.items():
+                                if episodes:
+                                    # 确保集数都是整数类型
+                                    int_episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in episodes]
+                                    seasons_with_episodes[season] = int_episodes
                             
                             if not seasons_with_episodes:
                                 logger.debug(f"剧集 {name} (TMDB: {tmdb_id}) 没有有集数的季")
@@ -945,6 +960,8 @@ class EmbyEpisodeSync(_PluginBase):
                     # 为每个季检查是否有缺集
                     for season, episodes in seasons.items():
                         try:
+                            # 确保集数都是整数类型
+                            episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in episodes]
                             episodes_list = sorted(list(set(episodes)))
                             
                             # 获取该季的总集数
@@ -957,7 +974,7 @@ class EmbyEpisodeSync(_PluginBase):
                                 should_create = True
                             else:
                                 # 检查是否有缺集：如果Emby中的集数等于总集数，说明已经下载完了，不需要创建订阅
-                                should_create = len(episodes_list) < total_episode_count
+                                should_create = len(episodes_list) < int(total_episode_count)
                                 
                                 if not should_create:
                                     logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
@@ -1026,6 +1043,8 @@ class EmbyEpisodeSync(_PluginBase):
                             if not episodes:
                                 continue
                             
+                            # 确保集数都是整数类型
+                            episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in episodes]
                             episodes_list = sorted(list(set(episodes)))
                             
                             # 获取该季的总集数
@@ -1038,7 +1057,7 @@ class EmbyEpisodeSync(_PluginBase):
                                 should_create = True
                             else:
                                 # 检查是否有缺集：如果Emby中的集数等于总集数，说明已经下载完了，不需要创建订阅
-                                should_create = len(episodes_list) < total_episode_count
+                                should_create = len(episodes_list) < int(total_episode_count)
                                 
                                 if not should_create:
                                     logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
