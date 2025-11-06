@@ -28,7 +28,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "1.5"
+    plugin_version = "1.8"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -47,6 +47,7 @@ class EmbyEpisodeSync(_PluginBase):
         self._send_notification = config.get("send_notification", True) if config else True
         self._onlyonce = config.get("onlyonce", False) if config else False
         self._auto_create_subscribe = config.get("auto_create_subscribe", False) if config else False
+        self._test_limit = config.get("test_limit", 5) if config else 5  # 测试模式限制数量
         
         # 初始化帮助类
         self._mediaserver_helper = MediaServerHelper()
@@ -106,6 +107,13 @@ class EmbyEpisodeSync(_PluginBase):
                 "methods": ["POST"],
                 "summary": "手动执行Emby集数同步",
                 "description": "手动触发Emby集数同步任务"
+            },
+            {
+                "path": "/test_sync",
+                "endpoint": self.test_sync,
+                "methods": ["POST"],
+                "summary": "测试运行Emby集数同步",
+                "description": "测试运行Emby集数同步任务，只处理少量数据用于测试"
             }
         ]
     
@@ -202,6 +210,27 @@ class EmbyEpisodeSync(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
+                                            "model": "test_limit",
+                                            "label": "测试模式限制数量",
+                                            "placeholder": "5",
+                                            "type": "number",
+                                            "hint": "测试运行时只处理前N个订阅/剧集，用于小规模测试"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
                                             "model": "cron",
                                             "label": "定时任务表达式",
                                             "placeholder": "0 3 * * * (每天凌晨3点)",
@@ -253,12 +282,66 @@ class EmbyEpisodeSync(_PluginBase):
             "mediaserver_name": "",
             "send_notification": True,
             "onlyonce": False,
-            "auto_create_subscribe": False
+            "auto_create_subscribe": False,
+            "test_limit": 5
         }
     
     def get_page(self) -> list:
         """获取插件页面"""
-        pass
+        return [
+            {
+                "component": "VCard",
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "props": {
+                            "class": "pa-2"
+                        },
+                        "content": [
+                            {
+                                "component": "span",
+                                "text": "测试运行"
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VCardText",
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "text": "测试运行功能会使用配置的测试模式限制数量，只处理少量数据用于测试。不会影响正常运行的定时任务。"
+                                }
+                            },
+                            {
+                                "component": "VRow",
+                                "content": [
+                                    {
+                                        "component": "VCol",
+                                        "props": {
+                                            "cols": 12
+                                        },
+                                        "content": [
+                                            {
+                                                "component": "VBtn",
+                                                "props": {
+                                                    "color": "primary",
+                                                    "variant": "elevated",
+                                                    "block": True,
+                                                    "onClick": "testSync"
+                                                },
+                                                "text": "测试运行同步任务"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
     
     def get_service(self) -> List[Dict[str, Any]]:
         """
@@ -294,7 +377,8 @@ class EmbyEpisodeSync(_PluginBase):
             "mediaserver_name": self._mediaserver_name,
             "send_notification": self._send_notification,
             "onlyonce": self._onlyonce,
-            "auto_create_subscribe": self._auto_create_subscribe
+            "auto_create_subscribe": self._auto_create_subscribe,
+            "test_limit": self._test_limit
         })
     
     @eventmanager.register(EventType.PluginAction)
@@ -340,15 +424,54 @@ class EmbyEpisodeSync(_PluginBase):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
     
-    def _execute_sync(self) -> Dict[str, Any]:
+    def test_sync(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
         """
-        执行Emby集数同步任务
+        测试运行Emby集数同步任务（只处理少量数据）
         
+        Args:
+            request_data: 请求数据，可包含test_limit参数覆盖配置
+            apikey: API密钥
+            
         Returns:
             Dict: 同步结果
         """
         try:
-            logger.info("=== 开始执行Emby集数同步任务 ===")
+            # 获取测试限制数量（优先使用请求参数，否则使用配置）
+            test_limit = request_data.get("test_limit", self._test_limit) if request_data else self._test_limit
+            test_limit = int(test_limit) if test_limit else 5
+            
+            logger.info(f"开始测试运行Emby集数同步任务（限制处理数量: {test_limit}）")
+            
+            # 执行同步（测试模式）
+            result = self._execute_sync(test_mode=True, test_limit=test_limit)
+            
+            return {
+                "success": True,
+                "message": f"测试运行Emby集数同步任务执行完成（限制数量: {test_limit}）",
+                "result": result
+            }
+            
+        except Exception as e:
+            error_msg = f"测试运行Emby集数同步任务执行失败：{str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+    
+    def _execute_sync(self, test_mode: bool = False, test_limit: int = 5) -> Dict[str, Any]:
+        """
+        执行Emby集数同步任务
+        
+        Args:
+            test_mode: 是否为测试模式
+            test_limit: 测试模式限制数量
+            
+        Returns:
+            Dict: 同步结果
+        """
+        try:
+            mode_str = "测试模式" if test_mode else "正常模式"
+            logger.info(f"=== 开始执行Emby集数同步任务 ({mode_str}) ===")
+            if test_mode:
+                logger.info(f"测试模式限制数量: {test_limit}")
             
             # 获取媒体服务器服务
             if not self._mediaserver_name:
@@ -399,6 +522,13 @@ class EmbyEpisodeSync(_PluginBase):
             subscribes = subscribe_oper.list()
             
             tv_subscribes = [s for s in subscribes if s.type == MediaType.TV.value]
+            
+            # 测试模式：限制处理数量
+            if test_mode and len(tv_subscribes) > test_limit:
+                original_count = len(tv_subscribes)
+                tv_subscribes = tv_subscribes[:test_limit]
+                logger.info(f"测试模式：从 {original_count} 个TV订阅中只处理前 {test_limit} 个")
+            
             logger.info(f"找到 {len(tv_subscribes)} 个TV类型订阅")
             
             # 按名称和TMDB ID分组，显示所有订阅的详细信息
@@ -418,9 +548,6 @@ class EmbyEpisodeSync(_PluginBase):
             created_count = 0
             updated_subscribes = []
             created_subscribes = []
-            
-            # 用于跟踪已处理的剧集（避免重复处理）
-            processed_series = {}  # {tmdb_id: {season: subscribe}}
             
             for subscribe in tv_subscribes:
                 try:
@@ -447,11 +574,6 @@ class EmbyEpisodeSync(_PluginBase):
                         logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到 (TMDB ID: {subscribe.tmdbid})")
                         skipped_count += 1
                         continue
-                    
-                    # 记录已处理的剧集和季
-                    if subscribe.tmdbid not in processed_series:
-                        processed_series[subscribe.tmdbid] = {}
-                    processed_series[subscribe.tmdbid][subscribe.season] = subscribe
                     
                     # 获取对应季的集数列表
                     emby_episodes = emby_season_episodes.get(subscribe.season, [])
@@ -519,7 +641,7 @@ class EmbyEpisodeSync(_PluginBase):
             if self._auto_create_subscribe:
                 logger.info("=== 开始检查并创建缺失的订阅 ===")
                 created_result = self._check_and_create_missing_subscribes(
-                    emby, subscribe_oper, processed_series
+                    emby, subscribe_oper, tv_subscribes, test_mode=test_mode, test_limit=test_limit
                 )
                 created_count = created_result.get("created_count", 0)
                 created_subscribes = created_result.get("created_subscribes", [])
@@ -559,15 +681,149 @@ class EmbyEpisodeSync(_PluginBase):
                 "error_count": 1
             }
     
+    def _get_all_emby_series(self, emby, test_mode: bool = False, test_limit: int = 5) -> Dict[str, Dict]:
+        """
+        从Emby获取所有剧集及其季和集数信息
+        
+        Args:
+            emby: Emby实例
+            test_mode: 是否为测试模式
+            test_limit: 测试模式限制数量
+            
+        Returns:
+            Dict: {tmdb_id: {"item_id": emby_item_id, "name": name, "year": year, "seasons": {season: [episodes]}}}
+        """
+        emby_series = {}
+        
+        try:
+            logger.info("=== 开始从Emby获取所有剧集 ===")
+            
+            if not emby._host or not emby._apikey:
+                logger.warning("Emby配置不完整，无法获取剧集列表")
+                return emby_series
+            
+            # 获取所有Series类型的项目
+            url = f"{emby._host}emby/Items"
+            params = {
+                "IncludeItemTypes": "Series",
+                "Recursive": "true",
+                "Fields": "ProviderIds,ProductionYear",
+                "api_key": emby._apikey,
+                "Limit": 1000  # 每次最多1000条
+            }
+            
+            start_index = 0
+            total_count = 0
+            
+            while True:
+                params["StartIndex"] = start_index
+                try:
+                    from app.utils.http import RequestUtils
+                    request_utils = RequestUtils()
+                    res = request_utils.get_res(url, params)
+                    if not res or res.status_code != 200:
+                        logger.warning(f"获取Emby剧集列表失败: {res.status_code if res else 'No response'}")
+                        break
+                    
+                    data = res.json()
+                    items = data.get("Items", [])
+                    total_record_count = data.get("TotalRecordCount", 0)
+                    
+                    if not items:
+                        break
+                    
+                    logger.info(f"获取到 {len(items)} 个剧集 (总计: {total_record_count})")
+                    
+                    for item in items:
+                        try:
+                            # 获取TMDB ID
+                            provider_ids = item.get("ProviderIds", {})
+                            tmdb_id_str = provider_ids.get("Tmdb")
+                            if not tmdb_id_str:
+                                continue
+                            
+                            tmdb_id = int(tmdb_id_str)
+                            item_id = item.get("Id")
+                            name = item.get("Name", "")
+                            year = item.get("ProductionYear")
+                            
+                            if not item_id or not name:
+                                continue
+                            
+                            # 获取该剧集的所有季和集数
+                            emby_item_id, emby_season_episodes = emby.get_tv_episodes(
+                                item_id=item_id,
+                                tmdb_id=tmdb_id,
+                                season=None  # 获取所有季的数据
+                            )
+                            
+                            if not emby_item_id or not emby_season_episodes:
+                                logger.debug(f"剧集 {name} (TMDB: {tmdb_id}) 无法获取集数信息")
+                                continue
+                            
+                            # 只记录有集数的季
+                            seasons_with_episodes = {
+                                season: episodes 
+                                for season, episodes in emby_season_episodes.items() 
+                                if episodes
+                            }
+                            
+                            if not seasons_with_episodes:
+                                logger.debug(f"剧集 {name} (TMDB: {tmdb_id}) 没有有集数的季")
+                                continue
+                            
+                            emby_series[tmdb_id] = {
+                                "item_id": emby_item_id,
+                                "name": name,
+                                "year": year,
+                                "seasons": seasons_with_episodes
+                            }
+                            
+                            total_count += 1
+                            
+                        except (ValueError, KeyError) as e:
+                            logger.debug(f"处理剧集项时出错: {str(e)}")
+                            continue
+                        except Exception as e:
+                            logger.warning(f"处理剧集项时发生错误: {str(e)}")
+                            continue
+                    
+                    # 检查是否还有更多数据
+                    start_index += len(items)
+                    if start_index >= total_record_count:
+                        break
+                    
+                except Exception as e:
+                    logger.error(f"获取Emby剧集列表时发生错误: {str(e)}")
+                    break
+            
+            logger.info(f"=== 从Emby获取到 {total_count} 个有集数的剧集 ===")
+            
+            # 测试模式：限制处理数量
+            if test_mode and len(emby_series) > test_limit:
+                original_count = len(emby_series)
+                # 只保留前test_limit个剧集
+                emby_series = dict(list(emby_series.items())[:test_limit])
+                logger.info(f"测试模式：从 {original_count} 个剧集中只处理前 {test_limit} 个")
+            
+        except Exception as e:
+            logger.error(f"获取Emby所有剧集时发生错误: {str(e)}")
+        
+        return emby_series
+    
     def _check_and_create_missing_subscribes(self, emby, subscribe_oper: SubscribeOper, 
-                                            processed_series: Dict) -> Dict[str, Any]:
+                                            tv_subscribes: List, test_mode: bool = False, 
+                                            test_limit: int = 5) -> Dict[str, Any]:
         """
         检查并创建缺失的订阅
+        先从Emby获取所有剧集，然后与MoviePilot订阅对比，找出差异
         
         Args:
             emby: Emby实例
             subscribe_oper: 订阅操作类
-            processed_series: 已处理的剧集字典 {tmdb_id: {season: subscribe}}
+            tv_subscribes: MoviePilot中的TV订阅列表
+            test_mode: 是否为测试模式
+            test_limit: 测试模式限制数量
             
         Returns:
             Dict: 创建结果
@@ -576,37 +832,52 @@ class EmbyEpisodeSync(_PluginBase):
         created_subscribes = []
         
         try:
-            # 遍历所有已处理的剧集
-            for tmdb_id, seasons_dict in processed_series.items():
+            # 第一步：从Emby获取所有剧集及其季和集数
+            logger.info("=== 第一步：从Emby获取所有剧集 ===")
+            emby_series = self._get_all_emby_series(emby, test_mode=test_mode, test_limit=test_limit)
+            
+            if not emby_series:
+                logger.info("Emby中没有找到剧集，跳过创建订阅")
+                return {
+                    "created_count": 0,
+                    "created_subscribes": []
+                }
+            
+            # 第二步：从MoviePilot获取所有订阅，按TMDB ID和季分组
+            logger.info("=== 第二步：从MoviePilot获取所有订阅 ===")
+            mp_subscribes_dict = {}  # {tmdb_id: {season: subscribe}}
+            
+            for subscribe in tv_subscribes:
+                if subscribe.best_version:
+                    continue  # 跳过洗版订阅
+                
+                if subscribe.tmdbid not in mp_subscribes_dict:
+                    mp_subscribes_dict[subscribe.tmdbid] = {}
+                mp_subscribes_dict[subscribe.tmdbid][subscribe.season] = subscribe
+            
+            logger.info(f"MoviePilot中有 {len(mp_subscribes_dict)} 个剧集的订阅")
+            
+            # 第三步：对比找出差异
+            logger.info("=== 第三步：对比找出差异 ===")
+            
+            # 找出Emby中有但MoviePilot中没有的剧集
+            emby_tmdb_ids = set(emby_series.keys())
+            mp_tmdb_ids = set(mp_subscribes_dict.keys())
+            
+            # 完全缺失的剧集（Emby有但MoviePilot完全没有订阅）
+            missing_series = emby_tmdb_ids - mp_tmdb_ids
+            logger.info(f"发现 {len(missing_series)} 个完全缺失的剧集")
+            
+            # 部分缺失的剧集（Emby有但MoviePilot缺少某些季）
+            partial_missing_series = emby_tmdb_ids & mp_tmdb_ids
+            
+            # 处理完全缺失的剧集
+            for tmdb_id in missing_series:
                 try:
-                    # 获取第一个订阅作为参考（用于获取剧集信息）
-                    first_subscribe = list(seasons_dict.values())[0]
+                    emby_info = emby_series[tmdb_id]
+                    seasons = emby_info["seasons"]
                     
-                    # 查询Emby中该剧集的所有季和集数
-                    emby_item_id, emby_season_episodes = emby.get_tv_episodes(
-                        title=first_subscribe.name,
-                        year=first_subscribe.year,
-                        tmdb_id=tmdb_id,
-                        season=None  # 获取所有季的数据
-                    )
-                    
-                    if not emby_item_id or not emby_season_episodes:
-                        logger.debug(f"剧集 {first_subscribe.name} (TMDB: {tmdb_id}) 在Emby中未找到，跳过创建订阅")
-                        continue
-                    
-                    # 获取Emby中所有有集数的季
-                    emby_seasons = set(emby_season_episodes.keys())
-                    # 获取已有订阅的季
-                    existing_seasons = set(seasons_dict.keys())
-                    
-                    # 找出缺失的季（Emby中有但订阅中没有的）
-                    missing_seasons = emby_seasons - existing_seasons
-                    
-                    if not missing_seasons:
-                        logger.debug(f"剧集 {first_subscribe.name} (TMDB: {tmdb_id}) 所有季都有订阅")
-                        continue
-                    
-                    logger.info(f"剧集 {first_subscribe.name} (TMDB: {tmdb_id}) 发现缺失的季: {sorted(missing_seasons)}")
+                    logger.info(f"发现完全缺失的剧集: {emby_info['name']} (TMDB: {tmdb_id})，有 {len(seasons)} 个季")
                     
                     # 通过TMDB ID识别媒体信息
                     mediainfo = self._media_chain.recognize_media(
@@ -615,30 +886,39 @@ class EmbyEpisodeSync(_PluginBase):
                     )
                     
                     if not mediainfo:
-                        logger.warning(f"无法通过TMDB ID {tmdb_id} 识别媒体信息，跳过创建订阅")
+                        logger.warning(f"无法通过TMDB ID {tmdb_id} 识别媒体信息: {emby_info['name']}")
                         continue
                     
-                    # 为每个缺失的季创建订阅
-                    for season in missing_seasons:
+                    # 为每个季检查是否有缺集
+                    for season, episodes in seasons.items():
                         try:
-                            # 获取该季的集数
-                            emby_episodes = emby_season_episodes.get(season, [])
-                            if not emby_episodes:
-                                logger.debug(f"剧集 {first_subscribe.name} S{season:02d} 在Emby中没有集数，跳过创建订阅")
-                                continue
+                            episodes_list = sorted(list(set(episodes)))
                             
-                            # 去重并排序
-                            episodes_list = sorted(list(set(emby_episodes)))
+                            # 获取该季的总集数
+                            total_episodes = mediainfo.seasons.get(season) if mediainfo.seasons else None
+                            total_episode_count = len(total_episodes) if total_episodes else 0
+                            
+                            # 如果无法获取总集数，默认创建订阅（保守策略）
+                            if total_episode_count == 0:
+                                logger.warning(f"无法获取 {mediainfo.title_year} S{season:02d} 的总集数，默认创建订阅")
+                                should_create = True
+                            else:
+                                # 检查是否有缺集：如果Emby中的集数等于总集数，说明已经下载完了，不需要创建订阅
+                                should_create = len(episodes_list) < total_episode_count
+                                
+                                if not should_create:
+                                    logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
+                                    continue
                             
                             logger.info(f"创建缺失订阅: {mediainfo.title_year} S{season:02d} (TMDB: {tmdb_id})")
-                            logger.info(f"  Emby中的集数: {episodes_list}")
+                            logger.info(f"  Emby中的集数: {episodes_list} ({len(episodes_list)}/{total_episode_count if total_episode_count > 0 else '未知'})")
                             
                             # 创建订阅
                             subscribe_id, message = subscribe_oper.add(
                                 mediainfo=mediainfo,
                                 season=season,
-                                note=episodes_list,  # 直接设置已下载的集数
-                                state='N'  # 新建状态
+                                note=episodes_list,
+                                state='N'
                             )
                             
                             logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
@@ -657,7 +937,88 @@ class EmbyEpisodeSync(_PluginBase):
                             continue
                             
                 except Exception as e:
-                    error_msg = f"处理剧集 {tmdb_id} 时发生错误: {str(e)}"
+                    error_msg = f"处理完全缺失的剧集 {tmdb_id} 时发生错误: {str(e)}"
+                    logger.error(error_msg)
+                    continue
+            
+            # 处理部分缺失的剧集（某些季缺失）
+            for tmdb_id in partial_missing_series:
+                try:
+                    emby_info = emby_series[tmdb_id]
+                    emby_seasons = set(emby_info["seasons"].keys())
+                    mp_seasons = set(mp_subscribes_dict[tmdb_id].keys())
+                    
+                    # 找出缺失的季
+                    missing_seasons = emby_seasons - mp_seasons
+                    
+                    if not missing_seasons:
+                        continue
+                    
+                    logger.info(f"剧集 {emby_info['name']} (TMDB: {tmdb_id}) 发现缺失的季: {sorted(missing_seasons)}")
+                    
+                    # 通过TMDB ID识别媒体信息
+                    mediainfo = self._media_chain.recognize_media(
+                        mtype=MediaType.TV,
+                        tmdbid=tmdb_id
+                    )
+                    
+                    if not mediainfo:
+                        logger.warning(f"无法通过TMDB ID {tmdb_id} 识别媒体信息: {emby_info['name']}")
+                        continue
+                    
+                    # 为每个缺失的季检查是否有缺集
+                    for season in missing_seasons:
+                        try:
+                            episodes = emby_info["seasons"].get(season, [])
+                            if not episodes:
+                                continue
+                            
+                            episodes_list = sorted(list(set(episodes)))
+                            
+                            # 获取该季的总集数
+                            total_episodes = mediainfo.seasons.get(season) if mediainfo.seasons else None
+                            total_episode_count = len(total_episodes) if total_episodes else 0
+                            
+                            # 如果无法获取总集数，默认创建订阅（保守策略）
+                            if total_episode_count == 0:
+                                logger.warning(f"无法获取 {mediainfo.title_year} S{season:02d} 的总集数，默认创建订阅")
+                                should_create = True
+                            else:
+                                # 检查是否有缺集：如果Emby中的集数等于总集数，说明已经下载完了，不需要创建订阅
+                                should_create = len(episodes_list) < total_episode_count
+                                
+                                if not should_create:
+                                    logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
+                                    continue
+                            
+                            logger.info(f"创建缺失订阅: {mediainfo.title_year} S{season:02d} (TMDB: {tmdb_id})")
+                            logger.info(f"  Emby中的集数: {episodes_list} ({len(episodes_list)}/{total_episode_count if total_episode_count > 0 else '未知'})")
+                            
+                            # 创建订阅
+                            subscribe_id, message = subscribe_oper.add(
+                                mediainfo=mediainfo,
+                                season=season,
+                                note=episodes_list,
+                                state='N'
+                            )
+                            
+                            logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
+                            
+                            created_count += 1
+                            created_subscribes.append({
+                                "name": mediainfo.title,
+                                "season": season,
+                                "tmdb_id": tmdb_id,
+                                "episodes": episodes_list
+                            })
+                            
+                        except Exception as e:
+                            error_msg = f"创建订阅 {mediainfo.title_year} S{season:02d} 时发生错误: {str(e)}"
+                            logger.error(error_msg)
+                            continue
+                            
+                except Exception as e:
+                    error_msg = f"处理部分缺失的剧集 {tmdb_id} 时发生错误: {str(e)}"
                     logger.error(error_msg)
                     continue
             
