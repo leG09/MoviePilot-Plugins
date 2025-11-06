@@ -599,7 +599,7 @@ class EmbyEpisodeSync(_PluginBase):
                     emby_episodes = emby_season_episodes.get(subscribe.season, [])
                     if not emby_episodes:
                         # 如果指定季没有数据，但Emby中有其他季的数据，记录详细信息以便调试
-                        available_seasons = sorted(list(emby_season_episodes.keys())) if emby_season_episodes else []
+                        available_seasons = sorted([str(k) for k in emby_season_episodes.keys()]) if emby_season_episodes else []
                         if available_seasons:
                             logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到集数。Emby中可用的季: {available_seasons}，订阅的季号: {subscribe.season}，可能订阅的季号配置不正确")
                         else:
