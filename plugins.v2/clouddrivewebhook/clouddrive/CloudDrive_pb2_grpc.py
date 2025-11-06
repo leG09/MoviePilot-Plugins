@@ -120,6 +120,11 @@ class CloudDriveFileSrvStub(object):
                 request_serializer=CloudDrive__pb2.CopyFileRequest.SerializeToString,
                 response_deserializer=CloudDrive__pb2.FileOperationResult.FromString,
                 _registered_method=True)
+        self.RemoveCompletedCopyTasks = channel.unary_unary(
+                '/clouddrive.CloudDriveFileSrv/RemoveCompletedCopyTasks',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                _registered_method=True)
         self.DeleteFile = channel.unary_unary(
                 '/clouddrive.CloudDriveFileSrv/DeleteFile',
                 request_serializer=CloudDrive__pb2.FileRequest.SerializeToString,
@@ -741,6 +746,13 @@ class CloudDriveFileSrvServicer(object):
 
     def CopyFile(self, request, context):
         """copy files to a dest folder
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RemoveCompletedCopyTasks(self, request, context):
+        """删除所有已完成的复制任务
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -1536,6 +1548,11 @@ def add_CloudDriveFileSrvServicer_to_server(servicer, server):
                     servicer.CopyFile,
                     request_deserializer=CloudDrive__pb2.CopyFileRequest.FromString,
                     response_serializer=CloudDrive__pb2.FileOperationResult.SerializeToString,
+            ),
+            'RemoveCompletedCopyTasks': grpc.unary_unary_rpc_method_handler(
+                    servicer.RemoveCompletedCopyTasks,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
             ),
             'DeleteFile': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteFile,
@@ -2497,6 +2514,33 @@ class CloudDriveFileSrv(object):
             '/clouddrive.CloudDriveFileSrv/CopyFile',
             CloudDrive__pb2.CopyFileRequest.SerializeToString,
             CloudDrive__pb2.FileOperationResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RemoveCompletedCopyTasks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/clouddrive.CloudDriveFileSrv/RemoveCompletedCopyTasks',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            google_dot_protobuf_dot_empty__pb2.Empty.FromString,
             options,
             channel_credentials,
             insecure,

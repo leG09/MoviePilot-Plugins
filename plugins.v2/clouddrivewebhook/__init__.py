@@ -1864,22 +1864,27 @@ class CloudDriveWebhook(_PluginBase):
         Returns:
             dict: 复制结果
         """
+        result = None
+        copy_called = False  # 标记是否调用了 CopyFile
         try:
             # 首先登录
             login_success, login_message = self._login_to_clouddrive()
             if not login_success:
-                return {"success": False, "message": f"登录失败: {login_message}"}
+                result = {"success": False, "message": f"登录失败: {login_message}"}
+                return result
             
             stub = self._get_grpc_stub()
             if not stub:
-                return {"success": False, "message": "无法创建gRPC连接"}
+                result = {"success": False, "message": "无法创建gRPC连接"}
+                return result
             
             # 导入protobuf消息
             try:
                 import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
             except ImportError as e:
                 logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
-                return {"success": False, "message": "未找到CloudDrive protobuf模块"}
+                result = {"success": False, "message": "未找到CloudDrive protobuf模块"}
+                return result
             
             # 获取目标目录
             target_dir = str(Path(target_path).parent)
@@ -1900,34 +1905,99 @@ class CloudDriveWebhook(_PluginBase):
             
             # 调用CopyFile RPC
             logger.info(f"调用CopyFile RPC: {source_path} => {target_dir}")
-            response = stub.CopyFile(copy_request, metadata=metadata)
-            
-            if response.success:
-                logger.info(f"文件复制成功: {source_path} => {target_dir}")
-                result_files = list(response.resultFilePaths) if response.resultFilePaths else []
-                return {
-                    "success": True,
-                    "message": f"文件复制成功: {response.errorMessage if response.errorMessage else '完成'}",
-                    "result_files": result_files
-                }
-            else:
-                error_msg = response.errorMessage if response.errorMessage else "未知错误"
-                logger.error(f"文件复制失败: {error_msg}")
-                return {
-                    "success": False,
-                    "message": f"文件复制失败: {error_msg}"
-                }
+            try:
+                response = stub.CopyFile(copy_request, metadata=metadata)
+                copy_called = True  # 标记已调用 CopyFile
+                
+                if response.success:
+                    logger.info(f"文件复制成功: {source_path} => {target_dir}")
+                    result_files = list(response.resultFilePaths) if response.resultFilePaths else []
+                    result = {
+                        "success": True,
+                        "message": f"文件复制成功: {response.errorMessage if response.errorMessage else '完成'}",
+                        "result_files": result_files
+                    }
+                else:
+                    error_msg = response.errorMessage if response.errorMessage else "未知错误"
+                    logger.error(f"文件复制失败: {error_msg}")
+                    result = {
+                        "success": False,
+                        "message": f"文件复制失败: {error_msg}"
+                    }
+            except Exception as copy_e:
+                # CopyFile 调用时发生任何错误，都标记为已调用（因为已经尝试执行复制操作）
+                copy_called = True
+                if isinstance(copy_e, grpc.RpcError):
+                    error_msg = f"gRPC调用失败: {copy_e.code()} - {copy_e.details()}"
+                else:
+                    error_msg = f"复制操作异常: {str(copy_e)}"
+                logger.error(error_msg)
+                result = {"success": False, "message": error_msg}
+                raise  # 重新抛出异常，让外层 except 处理
                 
         except grpc.RpcError as e:
-            error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+            # 如果已经在内部处理过，这里不会执行（因为上面已经重新抛出）
+            # 如果是在调用 CopyFile 之前发生的错误，这里会处理
+            if not copy_called:
+                error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
+                logger.error(error_msg)
+                result = {"success": False, "message": error_msg}
         except Exception as e:
             error_msg = f"复制文件时发生错误：{str(e)}"
             logger.error(error_msg)
             import traceback
             logger.error(f"错误堆栈: {traceback.format_exc()}")
-            return {"success": False, "message": error_msg}
+            result = {"success": False, "message": error_msg}
+        finally:
+            # 只有在调用了 CopyFile 之后才删除已完成的复制任务
+            if copy_called:
+                self._remove_completed_copy_tasks()
+            if result is not None:
+                return result
+            # 如果 result 为 None（理论上不应该发生），返回默认错误
+            return {"success": False, "message": "未知错误"}
+
+    def _remove_completed_copy_tasks(self):
+        """
+        删除所有已完成的复制任务
+        
+        使用 CloudDrive 的 RemoveCompletedCopyTasks gRPC 方法
+        请求和响应都是 google.protobuf.Empty
+        """
+        try:
+            # 首先登录
+            login_success, login_message = self._login_to_clouddrive()
+            if not login_success:
+                logger.warning(f"登录失败，无法删除已完成的复制任务: {login_message}")
+                return
+            
+            stub = self._get_grpc_stub()
+            if not stub:
+                logger.warning("无法创建gRPC连接，无法删除已完成的复制任务")
+                return
+            
+            # 导入protobuf消息
+            try:
+                from google.protobuf import empty_pb2
+            except ImportError as e:
+                logger.error(f"导入google.protobuf.empty_pb2失败: {str(e)}")
+                return
+            
+            # 创建带token的metadata
+            metadata = [('authorization', f'Bearer {self._token}')]
+            
+            # 调用RemoveCompletedCopyTasks RPC
+            logger.debug("调用RemoveCompletedCopyTasks RPC删除已完成的复制任务")
+            try:
+                stub.RemoveCompletedCopyTasks(empty_pb2.Empty(), metadata=metadata)
+                logger.debug("已成功删除已完成的复制任务")
+            except grpc.RpcError as e:
+                logger.warning(f"删除已完成的复制任务时发生gRPC错误: {e.code()} - {e.details()}")
+            except Exception as e:
+                logger.warning(f"删除已完成的复制任务时发生错误: {str(e)}")
+                
+        except Exception as e:
+            logger.warning(f"删除已完成的复制任务时发生异常: {str(e)}")
 
     def _ensure_directory_exists(self, directory_path: str) -> bool:
         """
