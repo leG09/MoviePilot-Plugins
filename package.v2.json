@@ -3,11 +3,13 @@
     "name": "QB种子优化",
     "description": "优化qBittorrent种子管理：删除无人做种的种子重新下载、提高有人做种的下载优先级、清除下载时间过长的种子",
     "labels": "下载管理,Qbittorrent",
-    "version": "1.1",
+    "version": "1.2",
     "icon": "Qbittorrent_A.png",
     "author": "leGO9",
     "level": 1,
     "history": {
+      "v1.2": "添加磁盘空间和I/O监控功能，支持检测磁盘空间不足时限制下载速度",
+      "v1.1": "添加磁盘空间监控功能，支持检测磁盘空间不足时限制下载速度",
       "v1.0": "首个版本，实现种子优化功能"
     }
   },

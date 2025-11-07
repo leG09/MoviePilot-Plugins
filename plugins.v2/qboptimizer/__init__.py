@@ -34,7 +34,7 @@ class QbOptimizer(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -356,6 +356,87 @@ class QbOptimizer(_PluginBase):
                 return
         self.show_status()
 
+    def _check_disk_space_before_optimize(self):
+        """
+        优化前检查磁盘空间，如果不足则跳过所有优化任务
+        返回 True 表示磁盘空间不足需要跳过，False 表示可以继续执行
+        """
+        logger.info("【QB种子优化】优先检查磁盘空间...")
+        
+        try:
+            # 获取第一个下载器进行磁盘空间检查
+            if not self._downloaders:
+                logger.warning("【QB种子优化】未配置下载器，无法检查磁盘空间")
+                return False  # 无法检查时继续执行
+            
+            first_downloader_name = self._downloaders[0]
+            downloader_obj = self.__get_downloader(first_downloader_name)
+            
+            if not downloader_obj:
+                logger.warning(f"【QB种子优化】无法获取下载器实例，继续执行优化任务")
+                return False
+            
+            # 获取qBittorrent客户端实例
+            qb_client = downloader_obj.qbc
+            if not qb_client:
+                logger.warning(f"【QB种子优化】无法获取qBittorrent客户端，继续执行优化任务")
+                return False
+            
+            # 调用qBittorrent API获取服务器状态
+            try:
+                response = qb_client._request(
+                    http_method='POST',
+                    api_namespace='sync',
+                    api_method='maindata',
+                    data={'rid': 0}
+                )
+                
+                # 解析响应数据
+                try:
+                    response_data = response.json()
+                except:
+                    import json
+                    response_data = json.loads(response.text)
+                
+                if 'server_state' not in response_data:
+                    logger.warning(f"【QB种子优化】无法获取服务器状态信息，继续执行优化任务")
+                    return False
+                
+                server_state = response_data['server_state']
+                free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
+                
+                logger.info(f"【QB种子优化】磁盘空间检查结果: 剩余空间 {free_space_gb:.2f}GB, 阈值 {self._disk_space_threshold}GB")
+                
+                if free_space_gb < self._disk_space_threshold:
+                    logger.warning(f"【QB种子优化】磁盘空间不足 ({free_space_gb:.2f}GB < {self._disk_space_threshold}GB)，跳过所有优化任务")
+                    
+                    # 发送通知
+                    if self._notify:
+                        notification_title = "【QB种子优化】磁盘空间不足，已跳过所有优化任务"
+                        notification_text = f"磁盘剩余空间: {free_space_gb:.2f}GB\n"
+                        notification_text += f"空间阈值: {self._disk_space_threshold}GB\n"
+                        notification_text += f"\n为避免进一步占用磁盘空间，已跳过所有优化任务"
+                        
+                        self.post_message(
+                            mtype=NotificationType.Manual,
+                            title=notification_title,
+                            text=notification_text
+                        )
+                    return True  # 磁盘空间不足，需要跳过
+                else:
+                    logger.info(f"【QB种子优化】磁盘空间充足，继续执行优化任务")
+                    return False  # 磁盘空间充足，可以继续
+                    
+            except Exception as e:
+                logger.warning(f"【QB种子优化】获取磁盘空间信息异常: {str(e)}，继续执行优化任务")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"【QB种子优化】磁盘空间检查异常: {str(e)}，继续执行优化任务")
+            import traceback
+            logger.debug(f"【QB种子优化】磁盘空间检查异常详情: {traceback.format_exc()}")
+            return False  # 异常时继续执行，避免阻塞
+
     def optimize_torrents(self):
         """
         执行种子优化
@@ -366,6 +447,10 @@ class QbOptimizer(_PluginBase):
         if not self._downloaders:
             logger.error("【QB种子优化】错误：未配置下载器，无法执行优化任务")
             return
+        
+        # 优先检查磁盘空间，如果不足则直接跳过所有任务
+        if self._check_disk_space_before_optimize():
+            return  # 磁盘空间不足，跳过所有优化任务
         
         total_zero_seed_removed = 0
         total_priority_boosted = 0
@@ -1286,9 +1371,11 @@ class QbOptimizer(_PluginBase):
         
         return len(timeout_torrents), redownload_failed_torrents
 
-    def _check_system_status_once(self, qb_client):
+    def _check_system_status_once(self, qb_client, check_disk_space=True):
         """
         单次检查系统状态
+        :param qb_client: qBittorrent客户端实例
+        :param check_disk_space: 是否检测磁盘空间（默认True，如果前面已检测过可设为False）
         """
         try:
             # 调用qBittorrent API获取服务器状态
@@ -1313,12 +1400,12 @@ class QbOptimizer(_PluginBase):
             server_state = response_data['server_state']
             
             # 获取各项指标
-            free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
+            free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3) if check_disk_space else 0  # 转换为GB
             write_cache_overload = float(server_state.get('write_cache_overload', 0))  # 百分比，确保是数值
             queued_io_jobs = int(server_state.get('queued_io_jobs', 0))  # I/O任务数，确保是整数
             
-            # 判断是否需要限制速度
-            disk_space_insufficient = free_space_gb < self._disk_space_threshold
+            # 判断是否需要限制速度（如果已检测过磁盘空间，则不将其作为限速条件）
+            disk_space_insufficient = (free_space_gb < self._disk_space_threshold) if check_disk_space else False
             io_cache_high = write_cache_overload > self._io_cache_threshold
             io_queue_high = queued_io_jobs > self._io_queue_threshold
             should_limit = disk_space_insufficient or io_cache_high or io_queue_high
@@ -1337,15 +1424,21 @@ class QbOptimizer(_PluginBase):
             logger.debug(f"【功能4-磁盘监控】单次检查异常: {str(e)}")
             return None
 
-    def _continuous_monitor_system(self, qb_client, monitor_duration=30, monitor_interval=3):
+    def _continuous_monitor_system(self, qb_client, monitor_duration=30, monitor_interval=3, check_disk_space=True):
         """
         持续监测系统状态，确保决策稳定性
+        :param qb_client: qBittorrent客户端实例
+        :param monitor_duration: 监测时长（秒）
+        :param monitor_interval: 监测间隔（秒）
+        :param check_disk_space: 是否检测磁盘空间（默认True，如果前面已检测过可设为False）
         """
         # 计算监测次数
         monitor_count = max(1, monitor_duration // monitor_interval)
         actual_duration = monitor_count * monitor_interval
         
         logger.info(f"【功能4-磁盘监控】开始持续监测 {actual_duration} 秒，每 {monitor_interval} 秒检查一次，共 {monitor_count} 次")
+        if not check_disk_space:
+            logger.info(f"【功能4-磁盘监控】跳过磁盘空间检测（已在优化前检测），仅监测I/O状态")
         
         monitor_results = []
         
@@ -1353,10 +1446,13 @@ class QbOptimizer(_PluginBase):
             logger.debug(f"【功能4-磁盘监控】第 {i+1}/{monitor_count} 次检查")
             
             # 单次检查
-            result = self._check_system_status_once(qb_client)
+            result = self._check_system_status_once(qb_client, check_disk_space=check_disk_space)
             if result:
                 monitor_results.append(result)
-                logger.debug(f"【功能4-磁盘监控】第 {i+1} 次检查结果: 磁盘{result['free_space_gb']:.1f}GB, I/O缓存{result['write_cache_overload']:.1f}%, I/O队列{result['queued_io_jobs']}, 需要限速: {result['should_limit']}")
+                if check_disk_space:
+                    logger.debug(f"【功能4-磁盘监控】第 {i+1} 次检查结果: 磁盘{result['free_space_gb']:.1f}GB, I/O缓存{result['write_cache_overload']:.1f}%, I/O队列{result['queued_io_jobs']}, 需要限速: {result['should_limit']}")
+                else:
+                    logger.debug(f"【功能4-磁盘监控】第 {i+1} 次检查结果: I/O缓存{result['write_cache_overload']:.1f}%, I/O队列{result['queued_io_jobs']}, 需要限速: {result['should_limit']}")
             else:
                 logger.warning(f"【功能4-磁盘监控】第 {i+1} 次检查失败")
             
@@ -1370,18 +1466,19 @@ class QbOptimizer(_PluginBase):
             return None, None, None
         
         # 计算平均值用于显示
-        avg_free_space = sum(r['free_space_gb'] for r in monitor_results) / len(monitor_results)
+        avg_free_space = sum(r['free_space_gb'] for r in monitor_results) / len(monitor_results) if check_disk_space else 0
         avg_cache_overload = sum(r['write_cache_overload'] for r in monitor_results) / len(monitor_results)
         avg_io_jobs = sum(r['queued_io_jobs'] for r in monitor_results) / len(monitor_results)
         
         logger.info(f"【功能4-磁盘监控】持续监测完成，共 {len(monitor_results)} 次有效检查")
         logger.info(f"【功能4-磁盘监控】平均状态:")
-        logger.info(f"  - 磁盘剩余空间: {avg_free_space:.2f}GB (阈值: {self._disk_space_threshold}GB)")
+        if check_disk_space:
+            logger.info(f"  - 磁盘剩余空间: {avg_free_space:.2f}GB (阈值: {self._disk_space_threshold}GB)")
         logger.info(f"  - 写入缓存过载: {avg_cache_overload:.1f}% (阈值: {self._io_cache_threshold}%)")
         logger.info(f"  - 队列I/O任务: {avg_io_jobs:.0f} (阈值: {self._io_queue_threshold})")
         
-        # 决策规则：使用平均值与阈值对比
-        disk_space_insufficient_avg = avg_free_space < self._disk_space_threshold
+        # 决策规则：使用平均值与阈值对比（如果已检测过磁盘空间，则不将其作为限速条件）
+        disk_space_insufficient_avg = (avg_free_space < self._disk_space_threshold) if check_disk_space else False
         io_cache_high_avg = avg_cache_overload > self._io_cache_threshold
         io_queue_high_avg = avg_io_jobs > self._io_queue_threshold
         final_should_limit = disk_space_insufficient_avg or io_cache_high_avg or io_queue_high_avg
@@ -1396,7 +1493,7 @@ class QbOptimizer(_PluginBase):
             'avg_free_space': avg_free_space,
             'avg_cache_overload': avg_cache_overload,
             'avg_io_jobs': avg_io_jobs,
-            'disk_issues': sum(1 for r in monitor_results if r['disk_space_insufficient']),
+            'disk_issues': sum(1 for r in monitor_results if r['disk_space_insufficient']) if check_disk_space else 0,
             'cache_issues': sum(1 for r in monitor_results if r['io_cache_high']),
             'queue_issues': sum(1 for r in monitor_results if r['io_queue_high'])
         }
@@ -1405,12 +1502,13 @@ class QbOptimizer(_PluginBase):
 
     def _monitor_disk_and_io(self, downloader_obj, downloader_name):
         """
-        监控磁盘空间和I/O状态，持续监测10秒后决定是否限制下载速度
+        监控I/O状态，持续监测后决定是否限制下载速度
+        注意：磁盘空间已在优化前检测过，此处不再重复检测
         """
-        logger.info(f"【功能4-磁盘监控】开始磁盘空间和I/O监控，功能开关: {self._enable_disk_monitor}")
+        logger.info(f"【功能4-磁盘监控】开始I/O监控，功能开关: {self._enable_disk_monitor}")
         
         if not self._enable_disk_monitor:
-            logger.info("【功能4-磁盘监控】磁盘空间和I/O监控功能已禁用，跳过")
+            logger.info("【功能4-磁盘监控】I/O监控功能已禁用，跳过")
             return False
             
         try:
@@ -1441,8 +1539,13 @@ class QbOptimizer(_PluginBase):
                 else:
                     logger.warning(f"【功能4-磁盘监控】临时解除限速失败，将在限速状态下进行监测")
             
-            # 持续监测系统状态
-            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(qb_client, self._monitor_duration, self._monitor_interval)
+            # 持续监测系统状态（跳过磁盘空间检测，因为已在优化前检测过）
+            final_should_limit, notification_data, monitor_results = self._continuous_monitor_system(
+                qb_client, 
+                self._monitor_duration, 
+                self._monitor_interval,
+                check_disk_space=False  # 跳过磁盘空间检测
+            )
             
             if final_should_limit is None:
                 logger.error("【功能4-磁盘监控】持续监测失败，无法做出决策")
@@ -1467,12 +1570,10 @@ class QbOptimizer(_PluginBase):
                 if success:
                     logger.info(f"【功能4-磁盘监控】下载速度限制成功: {self._speed_limit_mbps}MB/s")
                     
-                    # 发送通知
+                    # 发送通知（不包含磁盘空间信息，因为已在优化前检测过）
                     if self._notify and notification_data:
-                        notification_title = "【QB种子优化】系统资源不足，已限制下载速度"
-                        notification_text = f"持续监测{notification_data['monitor_count']}次，发现以下问题:\n"
-                        if notification_data['disk_issues'] > 0:
-                            notification_text += f"• 磁盘空间不足: {notification_data['disk_issues']}/{notification_data['monitor_count']}次 (平均: {notification_data['avg_free_space']:.2f}GB, 阈值: {self._disk_space_threshold}GB)\n"
+                        notification_title = "【QB种子优化】I/O资源不足，已限制下载速度"
+                        notification_text = f"持续监测{notification_data['monitor_count']}次，发现以下I/O问题:\n"
                         if notification_data['cache_issues'] > 0:
                             notification_text += f"• I/O缓存过高: {notification_data['cache_issues']}/{notification_data['monitor_count']}次 (平均: {notification_data['avg_cache_overload']:.1f}%, 阈值: {self._io_cache_threshold}%)\n"
                         if notification_data['queue_issues'] > 0:
@@ -1501,11 +1602,10 @@ class QbOptimizer(_PluginBase):
                 if success:
                     logger.info(f"【功能4-磁盘监控】下载速度恢复成功，已取消限制")
                     
-                    # 发送通知
+                    # 发送通知（不包含磁盘空间信息，因为已在优化前检测过）
                     if self._notify and notification_data:
-                        notification_title = "【QB种子优化】系统资源已恢复，已取消下载速度限制"
-                        notification_text = f"持续监测{notification_data['monitor_count']}次，系统资源已恢复正常:\n"
-                        notification_text += f"• 磁盘剩余空间: {notification_data['avg_free_space']:.2f}GB (阈值: {self._disk_space_threshold}GB) ✓\n"
+                        notification_title = "【QB种子优化】I/O资源已恢复，已取消下载速度限制"
+                        notification_text = f"持续监测{notification_data['monitor_count']}次，I/O资源已恢复正常:\n"
                         notification_text += f"• I/O缓存使用率: {notification_data['avg_cache_overload']:.1f}% (阈值: {self._io_cache_threshold}%) ✓\n"
                         notification_text += f"• 队列I/O任务: {notification_data['avg_io_jobs']:.0f} (阈值: {self._io_queue_threshold}) ✓\n"
                         notification_text += f"\n已自动取消下载速度限制"
