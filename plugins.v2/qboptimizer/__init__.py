@@ -34,7 +34,7 @@ class QbOptimizer(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.2"
+    plugin_version = "1.3"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -358,8 +358,11 @@ class QbOptimizer(_PluginBase):
 
     def _check_disk_space_before_optimize(self):
         """
-        优化前检查磁盘空间，如果不足则跳过所有优化任务
-        返回 True 表示磁盘空间不足需要跳过，False 表示可以继续执行
+        优化前检查磁盘空间
+        如果磁盘空间不足：
+        - 如果未限速，则限速并继续执行任务
+        - 如果已限速，则跳过所有优化任务
+        返回 True 表示需要跳过所有任务，False 表示可以继续执行
         """
         logger.info("【QB种子优化】优先检查磁盘空间...")
         
@@ -408,21 +411,65 @@ class QbOptimizer(_PluginBase):
                 logger.info(f"【QB种子优化】磁盘空间检查结果: 剩余空间 {free_space_gb:.2f}GB, 阈值 {self._disk_space_threshold}GB")
                 
                 if free_space_gb < self._disk_space_threshold:
-                    logger.warning(f"【QB种子优化】磁盘空间不足 ({free_space_gb:.2f}GB < {self._disk_space_threshold}GB)，跳过所有优化任务")
+                    logger.warning(f"【QB种子优化】磁盘空间不足 ({free_space_gb:.2f}GB < {self._disk_space_threshold}GB)")
                     
-                    # 发送通知
-                    if self._notify:
-                        notification_title = "【QB种子优化】磁盘空间不足，已跳过所有优化任务"
-                        notification_text = f"磁盘剩余空间: {free_space_gb:.2f}GB\n"
-                        notification_text += f"空间阈值: {self._disk_space_threshold}GB\n"
-                        notification_text += f"\n为避免进一步占用磁盘空间，已跳过所有优化任务"
+                    # 检查当前是否已限速
+                    try:
+                        current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
+                        our_limit_kbps = int(self._speed_limit_mbps * 1024)
+                        is_limited = current_download_limit > 0 and current_download_limit <= our_limit_kbps
                         
-                        self.post_message(
-                            mtype=NotificationType.Manual,
-                            title=notification_title,
-                            text=notification_text
-                        )
-                    return True  # 磁盘空间不足，需要跳过
+                        logger.info(f"【QB种子优化】当前速度限制: {current_download_limit}KB/s, 我们的限制值: {our_limit_kbps}KB/s, 已限速: {is_limited}")
+                        
+                        if not is_limited:
+                            # 未限速，则限速并继续执行任务
+                            logger.warning(f"【QB种子优化】磁盘空间不足且未限速，开始限制下载速度: {self._speed_limit_mbps}MB/s")
+                            
+                            speed_limit_bytes = int(self._speed_limit_mbps * 1024 * 1024)  # 转换为字节/秒
+                            success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
+                            
+                            if success:
+                                logger.info(f"【QB种子优化】下载速度限制成功，继续执行优化任务")
+                                
+                                # 发送通知
+                                if self._notify:
+                                    notification_title = "【QB种子优化】磁盘空间不足，已限制下载速度"
+                                    notification_text = f"磁盘剩余空间: {free_space_gb:.2f}GB\n"
+                                    notification_text += f"空间阈值: {self._disk_space_threshold}GB\n"
+                                    notification_text += f"\n已自动限制下载速度为: {self._speed_limit_mbps}MB/s\n"
+                                    notification_text += f"将继续执行优化任务"
+                                    
+                                    self.post_message(
+                                        mtype=NotificationType.Manual,
+                                        title=notification_title,
+                                        text=notification_text
+                                    )
+                                return False  # 已限速，继续执行任务
+                            else:
+                                logger.error(f"【QB种子优化】下载速度限制失败，跳过所有优化任务")
+                                return True  # 限速失败，跳过任务
+                        else:
+                            # 已限速，跳过所有优化任务
+                            logger.warning(f"【QB种子优化】磁盘空间不足且已限速，跳过所有优化任务")
+                            
+                            # 发送通知
+                            if self._notify:
+                                notification_title = "【QB种子优化】磁盘空间不足，已跳过所有优化任务"
+                                notification_text = f"磁盘剩余空间: {free_space_gb:.2f}GB\n"
+                                notification_text += f"空间阈值: {self._disk_space_threshold}GB\n"
+                                notification_text += f"当前已处于限速状态: {current_download_limit}KB/s\n"
+                                notification_text += f"\n为避免进一步占用磁盘空间，已跳过所有优化任务"
+                                
+                                self.post_message(
+                                    mtype=NotificationType.Manual,
+                                    title=notification_title,
+                                    text=notification_text
+                                )
+                            return True  # 已限速，跳过所有任务
+                            
+                    except Exception as e:
+                        logger.error(f"【QB种子优化】检查限速状态异常: {str(e)}，跳过所有优化任务")
+                        return True  # 异常时跳过任务，保守处理
                 else:
                     logger.info(f"【QB种子优化】磁盘空间充足，继续执行优化任务")
                     return False  # 磁盘空间充足，可以继续
