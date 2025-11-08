@@ -360,7 +360,7 @@ class QbOptimizer(_PluginBase):
         """
         优化前检查磁盘空间
         如果磁盘空间不足：
-        - 如果未限速，则限速并继续执行任务
+        - 如果未限速，则限速并停止执行任务
         - 如果已限速，则跳过所有优化任务
         返回 True 表示需要跳过所有任务，False 表示可以继续执行
         """
@@ -422,14 +422,14 @@ class QbOptimizer(_PluginBase):
                         logger.info(f"【QB种子优化】当前速度限制: {current_download_limit}KB/s, 我们的限制值: {our_limit_kbps}KB/s, 已限速: {is_limited}")
                         
                         if not is_limited:
-                            # 未限速，则限速并继续执行任务
+                            # 未限速，则限速并停止执行任务
                             logger.warning(f"【QB种子优化】磁盘空间不足且未限速，开始限制下载速度: {self._speed_limit_mbps}MB/s")
                             
                             speed_limit_bytes = int(self._speed_limit_mbps * 1024 * 1024)  # 转换为字节/秒
                             success = self._set_download_speed_limit(downloader_obj, speed_limit_bytes)
                             
                             if success:
-                                logger.info(f"【QB种子优化】下载速度限制成功，继续执行优化任务")
+                                logger.info(f"【QB种子优化】下载速度限制成功，停止执行优化任务")
                                 
                                 # 发送通知
                                 if self._notify:
@@ -437,14 +437,14 @@ class QbOptimizer(_PluginBase):
                                     notification_text = f"磁盘剩余空间: {free_space_gb:.2f}GB\n"
                                     notification_text += f"空间阈值: {self._disk_space_threshold}GB\n"
                                     notification_text += f"\n已自动限制下载速度为: {self._speed_limit_mbps}MB/s\n"
-                                    notification_text += f"将继续执行优化任务"
+                                    notification_text += f"已停止执行优化任务，避免进一步占用磁盘空间"
                                     
                                     self.post_message(
                                         mtype=NotificationType.Manual,
                                         title=notification_title,
                                         text=notification_text
                                     )
-                                return False  # 已限速，继续执行任务
+                                return True  # 已限速，停止执行任务
                             else:
                                 logger.error(f"【QB种子优化】下载速度限制失败，跳过所有优化任务")
                                 return True  # 限速失败，跳过任务
