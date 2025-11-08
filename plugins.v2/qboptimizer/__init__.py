@@ -34,7 +34,7 @@ class QbOptimizer(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -362,6 +362,8 @@ class QbOptimizer(_PluginBase):
         如果磁盘空间不足：
         - 如果未限速，则限速并停止执行任务
         - 如果已限速，则跳过所有优化任务
+        如果磁盘空间充足：
+        - 如果已限速（可能是之前因为磁盘空间不足而限速的），则解除限速
         返回 True 表示需要跳过所有任务，False 表示可以继续执行
         """
         logger.info("【QB种子优化】优先检查磁盘空间...")
@@ -471,7 +473,46 @@ class QbOptimizer(_PluginBase):
                         logger.error(f"【QB种子优化】检查限速状态异常: {str(e)}，跳过所有优化任务")
                         return True  # 异常时跳过任务，保守处理
                 else:
-                    logger.info(f"【QB种子优化】磁盘空间充足，继续执行优化任务")
+                    # 磁盘空间充足，检查是否需要解除限速
+                    logger.info(f"【QB种子优化】磁盘空间充足，检查是否需要解除限速...")
+                    
+                    try:
+                        current_download_limit, current_upload_limit = downloader_obj.get_speed_limit()
+                        our_limit_kbps = int(self._speed_limit_mbps * 1024)
+                        is_limited = current_download_limit > 0 and current_download_limit <= our_limit_kbps
+                        
+                        logger.info(f"【QB种子优化】当前速度限制: {current_download_limit}KB/s, 我们的限制值: {our_limit_kbps}KB/s, 已限速: {is_limited}")
+                        
+                        if is_limited:
+                            # 已限速，可能是之前因为磁盘空间不足而限速的，现在磁盘空间恢复了，解除限速
+                            logger.info(f"【QB种子优化】磁盘空间已恢复，解除下载速度限制")
+                            
+                            success = self._set_download_speed_limit(downloader_obj, 0)  # 0 表示无限制
+                            
+                            if success:
+                                logger.info(f"【QB种子优化】下载速度限制解除成功，继续执行优化任务")
+                                
+                                # 发送通知
+                                if self._notify:
+                                    notification_title = "【QB种子优化】磁盘空间已恢复，已解除下载速度限制"
+                                    notification_text = f"磁盘剩余空间: {free_space_gb:.2f}GB\n"
+                                    notification_text += f"空间阈值: {self._disk_space_threshold}GB\n"
+                                    notification_text += f"之前限速值: {current_download_limit}KB/s\n"
+                                    notification_text += f"\n已自动解除下载速度限制，恢复正常下载速度"
+                                    
+                                    self.post_message(
+                                        mtype=NotificationType.Manual,
+                                        title=notification_title,
+                                        text=notification_text
+                                    )
+                            else:
+                                logger.warning(f"【QB种子优化】下载速度限制解除失败，但继续执行优化任务")
+                        else:
+                            logger.info(f"【QB种子优化】未检测到限速状态，继续执行优化任务")
+                            
+                    except Exception as e:
+                        logger.warning(f"【QB种子优化】检查限速状态异常: {str(e)}，继续执行优化任务")
+                    
                     return False  # 磁盘空间充足，可以继续
                     
             except Exception as e:
