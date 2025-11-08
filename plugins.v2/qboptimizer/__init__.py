@@ -706,10 +706,28 @@ class QbOptimizer(_PluginBase):
                         'save_path': getattr(torrent, 'save_path', '') or getattr(torrent, 'content_path', '')
                     }
                     
-                    # 删除种子（不保留文件）
-                    result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                    # 删除种子和文件
+                    torrent_hash = getattr(torrent, 'hash', '')
+                    logger.info(f"【功能1-无人做种】准备删除种子和文件: {torrent.name}, HASH: {torrent_hash}")
+                    
+                    # 尝试直接使用 qBittorrent API 删除，确保文件被删除
+                    try:
+                        if hasattr(downloader_obj, 'qbc') and downloader_obj.qbc:
+                            # 直接使用 qBittorrent API 删除，delete_files=True 表示删除文件
+                            downloader_obj.qbc.torrents_delete(delete_files=True, torrent_hashes=torrent_hash)
+                            logger.info(f"【功能1-无人做种】通过 qBittorrent API 删除成功: {torrent.name}")
+                            result = True
+                        else:
+                            # 回退到使用封装方法
+                            result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                            logger.info(f"【功能1-无人做种】通过封装方法删除: {torrent.name}, 结果: {result}")
+                    except Exception as e:
+                        logger.error(f"【功能1-无人做种】删除种子异常: {torrent.name}, 错误: {str(e)}")
+                        # 回退到使用封装方法
+                        result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                    
                     if result:
-                        logger.info(f"【功能1-无人做种】删除审计-成功: {torrent.name} (HASH={getattr(torrent, 'hash', 'N/A')})，已保留数据文件")
+                        logger.info(f"【功能1-无人做种】删除审计-成功: {torrent.name} (HASH={torrent_hash})，已删除种子与数据文件")
                         # 重新下载逻辑
                         if self._enable_auto_redownload and self._search_sites:
                             logger.info(f"【功能1-无人做种】开始搜索同名种子文件，做种数最多的作为下载任务")
@@ -1368,9 +1386,27 @@ class QbOptimizer(_PluginBase):
                 
                 try:
                     # 删除种子和文件
-                    result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                    torrent_hash = getattr(torrent, 'hash', '')
+                    logger.info(f"【功能2-慢速下载】准备删除种子和文件: {torrent.name}, HASH: {torrent_hash}")
+                    
+                    # 尝试直接使用 qBittorrent API 删除，确保文件被删除
+                    try:
+                        if hasattr(downloader_obj, 'qbc') and downloader_obj.qbc:
+                            # 直接使用 qBittorrent API 删除，delete_files=True 表示删除文件
+                            downloader_obj.qbc.torrents_delete(delete_files=True, torrent_hashes=torrent_hash)
+                            logger.info(f"【功能2-慢速下载】通过 qBittorrent API 删除成功: {torrent.name}")
+                            result = True
+                        else:
+                            # 回退到使用封装方法
+                            result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                            logger.info(f"【功能2-慢速下载】通过封装方法删除: {torrent.name}, 结果: {result}")
+                    except Exception as e:
+                        logger.error(f"【功能2-慢速下载】删除种子异常: {torrent.name}, 错误: {str(e)}")
+                        # 回退到使用封装方法
+                        result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                    
                     if result:
-                        logger.info(f"【功能2-慢速下载】删除审计-成功: {torrent.name} (HASH={getattr(torrent, 'hash', 'N/A')})，已删除种子与数据文件")
+                        logger.info(f"【功能2-慢速下载】删除审计-成功: {torrent.name} (HASH={torrent_hash})，已删除种子与数据文件")
                         # 重新下载逻辑
                         if self._enable_auto_redownload and self._search_sites:
                             logger.info(f"【功能2-慢速下载】开始搜索同名种子文件，做种数最多的作为下载任务")
