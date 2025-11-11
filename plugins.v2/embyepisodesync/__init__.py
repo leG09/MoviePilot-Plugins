@@ -28,7 +28,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -615,6 +615,10 @@ class EmbyEpisodeSync(_PluginBase):
                     # 确保集数都是整数类型（Emby可能返回字符串）
                     emby_episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in emby_episodes]
                     
+                    # 去重集数（一集可能有多个版本）
+                    emby_episodes_set = set(emby_episodes)
+                    unique_episode_count = len(emby_episodes_set)
+                    
                     # 计算是否已经全集集齐（使用TMDB总集数）
                     total_episode_count = 0
                     try:
@@ -635,10 +639,11 @@ class EmbyEpisodeSync(_PluginBase):
                         except (ValueError, TypeError):
                             pass
                     
-                    if total_episode_count > 0 and len(emby_episodes) >= total_episode_count:
+                    # 使用去重后的集数判断是否全集（避免一集多版本导致误判）
+                    if total_episode_count > 0 and unique_episode_count >= total_episode_count:
                         # 已全集且非洗版，若仍为订阅中则自动取消（置为暂停S）
                         if (subscribe.state in ['N', 'R', 'P']) and not subscribe.best_version:
-                            logger.info(f"订阅 {subscribe.name} S{subscribe.season:02d} 已全集({len(emby_episodes)}/{total_episode_count})，自动取消订阅")
+                            logger.info(f"订阅 {subscribe.name} S{subscribe.season:02d} 已全集(去重后{unique_episode_count}/{total_episode_count}，原始{len(emby_episodes)}集)，自动取消订阅")
                             payload = {
                                 "state": 'S',
                                 "lack_episode": 0,
@@ -656,7 +661,7 @@ class EmbyEpisodeSync(_PluginBase):
                             continue
                     
                     # 使用Emby的集数作为新的已下载集数（去重并排序）
-                    emby_episodes_set = set(emby_episodes)
+                    # 注意：emby_episodes_set 已在前面创建
                     # 确保current_episodes也是整数类型
                     current_episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in current_episodes] if current_episodes else []
                     current_episodes_set = set(current_episodes)
