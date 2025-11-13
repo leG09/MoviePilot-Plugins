@@ -30,11 +30,11 @@ class QbOptimizer(_PluginBase):
     # 插件名称
     plugin_name = "QB种子优化"
     # 插件描述
-    plugin_desc = "优化qBittorrent种子管理：清理进行中无人做种任务、清理预计下载时长超过N小时且已下载N小时的慢速任务、智能综合评分优先级（下载速度+做种数+进度）"
+    plugin_desc = "优化qBittorrent种子管理：清理进行中无人做种任务、清理预计下载时长超过N小时且已下载N小时的慢速任务、智能综合评分优先级（下载速度+做种数+进度）、下载阈值控制（动态调整文件下载优先级确保磁盘空间不超阈值）"
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.5"
+    plugin_version = "1.6"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -86,6 +86,10 @@ class QbOptimizer(_PluginBase):
     _speed_limit_mbps = 1            # 限制下载速度（MB/s）
     _monitor_duration = 30           # 持续监测时长（秒）
     _monitor_interval = 3            # 监测间隔（秒）
+    
+    # 下载阈值控制配置
+    _enable_download_threshold = False  # 启用下载阈值控制
+    _min_disk_space_threshold = 50      # 最小磁盘空间阈值（GB）
 
     def init_plugin(self, config: dict = None):
         logger.info("【QB种子优化】开始初始化插件...")
@@ -136,6 +140,10 @@ class QbOptimizer(_PluginBase):
             self._monitor_duration = int(config.get("monitor_duration", 30))
             self._monitor_interval = int(config.get("monitor_interval", 3))
             
+            # 下载阈值控制配置
+            self._enable_download_threshold = config.get("enable_download_threshold", False)
+            self._min_disk_space_threshold = float(config.get("min_disk_space_threshold", 50))
+            
             logger.info(f"【QB种子优化】配置加载完成:")
             logger.info(f"  - 启用状态: {self._enabled}")
             logger.info(f"  - 立即运行: {self._onlyonce}")
@@ -163,6 +171,8 @@ class QbOptimizer(_PluginBase):
             logger.info(f"  - 速度限制: {self._speed_limit_mbps}MB/s")
             logger.info(f"  - 监测时长: {self._monitor_duration}秒")
             logger.info(f"  - 监测间隔: {self._monitor_interval}秒")
+            logger.info(f"  - 下载阈值控制开关: {self._enable_download_threshold}")
+            logger.info(f"  - 最小磁盘空间阈值: {self._min_disk_space_threshold}GB")
         else:
             logger.warning("【QB种子优化】未收到配置，使用默认值")
 
@@ -217,6 +227,9 @@ class QbOptimizer(_PluginBase):
                     "speed_limit_mbps": self._speed_limit_mbps,
                     "monitor_duration": self._monitor_duration,
                     "monitor_interval": self._monitor_interval,
+                    # 下载阈值控制配置
+                    "enable_download_threshold": self._enable_download_threshold,
+                    "min_disk_space_threshold": self._min_disk_space_threshold,
                 }
                 logger.info(f"【QB种子优化】保存配置: {config_to_save}")
                 self.update_config(config_to_save)
@@ -600,6 +613,9 @@ class QbOptimizer(_PluginBase):
                     
                     # 执行磁盘空间和I/O监控
                     disk_monitor_result = self._monitor_disk_and_io(downloader_obj, downloader_name)
+                    
+                    # 执行下载阈值控制
+                    download_threshold_result = self._manage_download_threshold(downloader_obj, all_torrents, downloader_name)
                     
                     total_zero_seed_removed += zero_seed_removed
                     total_priority_boosted += priority_boosted
@@ -1797,6 +1813,250 @@ class QbOptimizer(_PluginBase):
             logger.error(f"【功能4-磁盘监控】设置速度限制异常详情: {traceback.format_exc()}")
             return False
 
+    def _manage_download_threshold(self, downloader_obj, torrents, downloader_name):
+        """
+        下载阈值控制管理：如果预计下载中的文件空间会超过设定的最小磁盘空间，动态调整文件下载优先级
+        只处理优先级不为0的文件（需要下载的文件），跳过优先级为0的文件（不下载的文件）
+        优先级分为：正常(1)、较高(6)、最高(7)，确保所有需要下载的文件都在下载，只是优先级不同
+        """
+        logger.info(f"【功能5-下载阈值控制】开始下载阈值控制管理，功能开关: {self._enable_download_threshold}")
+        
+        if not self._enable_download_threshold:
+            logger.info("【功能5-下载阈值控制】下载阈值控制功能已禁用，跳过")
+            return False
+        
+        try:
+            # 获取qBittorrent客户端实例
+            qb_client = downloader_obj.qbc
+            if not qb_client:
+                logger.error("【功能5-下载阈值控制】无法获取qBittorrent客户端")
+                return False
+            
+            # 获取当前磁盘空间
+            try:
+                response = qb_client._request(
+                    http_method='POST',
+                    api_namespace='sync',
+                    api_method='maindata',
+                    data={'rid': 0}
+                )
+                
+                try:
+                    response_data = response.json()
+                except:
+                    import json
+                    response_data = json.loads(response.text)
+                
+                if 'server_state' not in response_data:
+                    logger.warning(f"【功能5-下载阈值控制】无法获取服务器状态信息")
+                    return False
+                
+                server_state = response_data['server_state']
+                free_space_gb = server_state.get('free_space_on_disk', 0) / (1024**3)  # 转换为GB
+                
+                logger.info(f"【功能5-下载阈值控制】当前磁盘剩余空间: {free_space_gb:.2f}GB, 最小阈值: {self._min_disk_space_threshold}GB")
+                
+            except Exception as e:
+                logger.error(f"【功能5-下载阈值控制】获取磁盘空间失败: {str(e)}")
+                return False
+            
+            # 筛选下载中的种子
+            downloading_torrents = []
+            for torrent in torrents:
+                state_name = getattr(torrent, 'state', '') or ''
+                state_lower = state_name.lower()
+                is_downloading = 'downloading' in state_lower or 'stalleddl' in state_lower or 'metadl' in state_lower
+                
+                if is_downloading:
+                    progress = getattr(torrent, 'progress', 0)
+                    # 只处理未完成的种子
+                    if progress < 1.0:
+                        downloading_torrents.append(torrent)
+            
+            if not downloading_torrents:
+                logger.info(f"【功能5-下载阈值控制】没有下载中的种子，无需调整")
+                return False
+            
+            logger.info(f"【功能5-下载阈值控制】发现 {len(downloading_torrents)} 个下载中的种子")
+            
+            # 收集所有需要下载的文件信息（优先级不为0的文件）
+            all_file_info_list = []  # 存储所有需要下载的文件信息
+            torrent_file_map = {}  # 存储每个种子的文件信息，用于后续调整优先级
+            
+            for torrent in downloading_torrents:
+                torrent_hash = getattr(torrent, 'hash', '')
+                torrent_name = getattr(torrent, 'name', 'Unknown')
+                
+                try:
+                    # 获取种子文件列表
+                    files = downloader_obj.get_files(tid=torrent_hash)
+                    if not files:
+                        logger.debug(f"【功能5-下载阈值控制】无法获取种子文件列表: {torrent_name}")
+                        continue
+                    
+                    # 计算种子的综合评分用于排序
+                    seeder_count = self._get_seeder_count(torrent)
+                    dlspeed = getattr(torrent, 'dlspeed', 0)
+                    speed_score = (dlspeed / (1024 * 1024)) * self._speed_weight
+                    seeder_score = seeder_count * self._seeder_weight
+                    torrent_score = speed_score + seeder_score
+                    
+                    # 收集该种子中需要下载的文件（优先级不为0）
+                    torrent_files = []
+                    for file in files:
+                        # 获取文件优先级，如果为0则跳过（不下载的文件）
+                        file_priority = getattr(file, 'priority', 0)
+                        if file_priority == 0:
+                            continue  # 跳过不下载的文件
+                        
+                        file_progress = getattr(file, 'progress', 0)
+                        if file_progress >= 1.0:
+                            continue  # 跳过已完成的文件
+                        
+                        file_id = getattr(file, 'id', None) or getattr(file, 'index', None)
+                        if file_id is None:
+                            continue
+                        
+                        file_size = getattr(file, 'size', 0)
+                        remaining_size = file_size * (1 - file_progress)
+                        
+                        file_info = {
+                            'torrent_hash': torrent_hash,
+                            'torrent_name': torrent_name,
+                            'file_id': file_id,
+                            'file_size': file_size,
+                            'remaining_size': remaining_size,
+                            'file_progress': file_progress,
+                            'file_priority': file_priority,
+                            'torrent_score': torrent_score,  # 使用种子综合评分
+                        }
+                        
+                        torrent_files.append(file_info)
+                        all_file_info_list.append(file_info)
+                    
+                    if torrent_files:
+                        torrent_file_map[torrent_hash] = {
+                            'torrent': torrent,
+                            'torrent_name': torrent_name,
+                            'torrent_score': torrent_score,
+                            'files': torrent_files
+                        }
+                    
+                except Exception as e:
+                    logger.warning(f"【功能5-下载阈值控制】处理种子文件异常: {torrent_name}, 错误: {str(e)}")
+                    continue
+            
+            if not all_file_info_list:
+                logger.info(f"【功能5-下载阈值控制】没有需要下载的文件（所有文件优先级为0或已完成），无需调整")
+                return False
+            
+            # 计算所有需要下载的文件的总剩余大小
+            total_remaining_size = sum(f['remaining_size'] for f in all_file_info_list)
+            total_remaining_gb = total_remaining_size / (1024**3)
+            estimated_free_space = free_space_gb - total_remaining_gb
+            
+            logger.info(f"【功能5-下载阈值控制】需要下载的文件总数: {len(all_file_info_list)}")
+            logger.info(f"【功能5-下载阈值控制】预计下载空间（仅计算需要下载的文件）: {total_remaining_gb:.2f}GB")
+            logger.info(f"【功能5-下载阈值控制】预计剩余空间: {estimated_free_space:.2f}GB")
+            
+            # 如果预计剩余空间小于最小阈值，需要调整文件优先级
+            if estimated_free_space < self._min_disk_space_threshold:
+                logger.warning(f"【功能5-下载阈值控制】预计剩余空间({estimated_free_space:.2f}GB) < 最小阈值({self._min_disk_space_threshold}GB)，开始调整文件优先级")
+                
+                # 按种子综合评分和文件大小排序文件（优先考虑种子评分，其次考虑文件大小）
+                # 这样可以让高评分的种子中的文件优先下载，同时大文件也会优先
+                all_file_info_list.sort(key=lambda x: (x['torrent_score'], x['file_size']), reverse=True)
+                
+                # 将文件分为三个优先级组
+                total_file_count = len(all_file_info_list)
+                high_priority_count = max(1, total_file_count // 3)  # 最高优先级：前1/3
+                medium_priority_count = max(1, (total_file_count - high_priority_count) // 2)  # 较高优先级：中间1/3
+                # 正常优先级：剩余部分
+                
+                high_priority_files = all_file_info_list[:high_priority_count]
+                medium_priority_files = all_file_info_list[high_priority_count:high_priority_count + medium_priority_count]
+                normal_priority_files = all_file_info_list[high_priority_count + medium_priority_count:]
+                
+                logger.info(f"【功能5-下载阈值控制】文件优先级分组: 最高({len(high_priority_files)}个) | 较高({len(medium_priority_files)}个) | 正常({len(normal_priority_files)}个)")
+                
+                # 按种子分组，批量设置文件优先级（提高效率）
+                success_torrent_count = 0
+                total_file_adjusted = 0
+                
+                # 按优先级组处理
+                for priority_group, priority_value in [
+                    (high_priority_files, 7),  # 最高优先级
+                    (medium_priority_files, 6),  # 较高优先级
+                    (normal_priority_files, 1)   # 正常优先级
+                ]:
+                    # 按种子分组文件
+                    files_by_torrent = {}
+                    for file_info in priority_group:
+                        torrent_hash = file_info['torrent_hash']
+                        if torrent_hash not in files_by_torrent:
+                            files_by_torrent[torrent_hash] = []
+                        files_by_torrent[torrent_hash].append(file_info['file_id'])
+                    
+                    # 为每个种子批量设置文件优先级
+                    for torrent_hash, file_ids in files_by_torrent.items():
+                        torrent_info = torrent_file_map.get(torrent_hash)
+                        if not torrent_info:
+                            continue
+                        
+                        try:
+                            priority_name = {7: "最高", 6: "较高", 1: "正常"}.get(priority_value, "未知")
+                            
+                            # 设置文件优先级（只调整需要下载的文件，不改变优先级为0的文件）
+                            result = downloader_obj.set_files(
+                                torrent_hash=torrent_hash,
+                                file_ids=file_ids,
+                                priority=priority_value
+                            )
+                            
+                            if result:
+                                logger.info(f"【功能5-下载阈值控制】设置文件优先级成功: {torrent_info['torrent_name']} -> {priority_name}优先级({priority_value}), 文件数: {len(file_ids)}")
+                                success_torrent_count += 1
+                                total_file_adjusted += len(file_ids)
+                            else:
+                                logger.warning(f"【功能5-下载阈值控制】设置文件优先级失败: {torrent_info['torrent_name']}")
+                                
+                        except Exception as e:
+                            logger.error(f"【功能5-下载阈值控制】调整文件优先级异常: {torrent_info['torrent_name']}, 错误: {str(e)}")
+                            import traceback
+                            logger.debug(f"【功能5-下载阈值控制】异常详情: {traceback.format_exc()}")
+                
+                logger.info(f"【功能5-下载阈值控制】文件优先级调整完成: 成功调整 {total_file_adjusted} 个文件，涉及 {success_torrent_count} 个种子")
+                
+                # 发送通知
+                if self._notify:
+                    notification_title = "【QB种子优化】下载阈值控制已调整文件优先级"
+                    notification_text = f"当前磁盘剩余空间: {free_space_gb:.2f}GB\n"
+                    notification_text += f"预计下载空间（仅需下载的文件）: {total_remaining_gb:.2f}GB\n"
+                    notification_text += f"预计剩余空间: {estimated_free_space:.2f}GB\n"
+                    notification_text += f"最小阈值: {self._min_disk_space_threshold}GB\n"
+                    notification_text += f"\n已调整 {total_file_adjusted} 个文件的优先级，涉及 {success_torrent_count} 个种子:\n"
+                    notification_text += f"• 最高优先级: {len(high_priority_files)}个文件\n"
+                    notification_text += f"• 较高优先级: {len(medium_priority_files)}个文件\n"
+                    notification_text += f"• 正常优先级: {len(normal_priority_files)}个文件\n"
+                    notification_text += f"\n只调整需要下载的文件（优先级不为0），跳过不下载的文件（优先级为0）"
+                    
+                    self.post_message(
+                        mtype=NotificationType.Manual,
+                        title=notification_title,
+                        text=notification_text
+                    )
+                
+                return True
+            else:
+                logger.info(f"【功能5-下载阈值控制】预计剩余空间({estimated_free_space:.2f}GB) >= 最小阈值({self._min_disk_space_threshold}GB)，无需调整")
+                return False
+                
+        except Exception as e:
+            logger.error(f"【功能5-下载阈值控制】下载阈值控制管理异常: {str(e)}")
+            import traceback
+            logger.error(f"【功能5-下载阈值控制】异常详情: {traceback.format_exc()}")
+            return False
+
     def _re_download_torrent(self, torrent_info):
         """
         重新下载种子
@@ -2812,6 +3072,87 @@ class QbOptimizer(_PluginBase):
                         ]
                     },
                     
+                    # 下载阈值控制配置组
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VDivider',
+                                        'props': {
+                                            'text': '下载阈值控制'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'enable_download_threshold',
+                                            'label': '启用下载阈值控制',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'min_disk_space_threshold',
+                                            'label': '最小磁盘空间阈值（GB）',
+                                            'placeholder': '50',
+                                            'type': 'number'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': '📊 下载阈值控制：当预计下载空间会超过最小磁盘空间阈值时，自动调整文件下载优先级（正常/较高/最高）。只处理需要下载的文件（优先级不为0），跳过不下载的文件（优先级为0）。按种子综合评分和文件大小排序分配优先级，让磁盘空间永远不会超过阈值'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    
                     # 其他配置组
                     {
                         'component': 'VRow',
@@ -2957,6 +3298,9 @@ class QbOptimizer(_PluginBase):
             "speed_limit_mbps": 1,
             "monitor_duration": 30,
             "monitor_interval": 3,
+            # 下载阈值控制配置
+            "enable_download_threshold": False,
+            "min_disk_space_threshold": 50,
         }
 
     def get_page(self) -> List[dict]:
