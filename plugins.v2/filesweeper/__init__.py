@@ -23,6 +23,7 @@ from app.db import get_db, SessionFactory
 from app.db.models.transferhistory import TransferHistory
 from app.chain.storage import StorageChain
 from app.core.event import eventmanager
+from app.modules.filemanager import FileManagerModule
 
 
 class FileSweeper(_PluginBase):
@@ -33,7 +34,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除或转移MoviePilot转移失败的文件，支持智能模式根据失败原因自动决定删除或转移"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.3"
+    plugin_version = "2.4"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -493,6 +494,7 @@ class FileSweeper(_PluginBase):
     def _transfer_file_to_target(self, src_fileitem: Any, target_dir: str, folder_name: str) -> Tuple[bool, str, int]:
         """
         将文件转移到目标文件夹
+        参考 gdcloudlinkmonitor 插件的实现方式
         
         Args:
             src_fileitem: 源文件项
@@ -503,6 +505,8 @@ class FileSweeper(_PluginBase):
             Tuple[bool, str, int]: (是否成功, 错误信息, 转移的文件数量)
         """
         try:
+            logger.info(f"开始转移文件: {src_fileitem.path} (类型: {src_fileitem.type}, 存储: {src_fileitem.storage}) -> {target_dir}/{folder_name}")
+            
             target_path = Path(target_dir)
             if not target_path.exists():
                 target_path.mkdir(parents=True, exist_ok=True)
@@ -516,52 +520,90 @@ class FileSweeper(_PluginBase):
             
             transferred_count = 0
             storage_chain = StorageChain()
+            file_manager = FileManagerModule()
             
             # 如果源文件是文件，直接转移
             if src_fileitem.type == "file":
                 src_path = Path(src_fileitem.path)
                 # 检查是否是本地文件
                 if src_fileitem.storage == "local" and src_path.exists():
+                    logger.debug(f"处理本地文件: {src_path}")
                     target_file = target_folder / src_path.name
-                    if not target_file.exists():
-                        shutil.move(str(src_path), str(target_file))
-                        logger.info(f"转移文件: {src_path} -> {target_file}")
-                        transferred_count += 1
-                    else:
+                    if target_file.exists():
                         # 文件已存在，添加时间戳
+                        logger.warning(f"目标文件已存在，将重命名: {target_file}")
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         name_parts = src_path.stem, timestamp, src_path.suffix
                         new_name = f"{name_parts[0]}_{name_parts[1]}{name_parts[2]}"
                         target_file = target_folder / new_name
-                        shutil.move(str(src_path), str(target_file))
-                        logger.info(f"转移文件（重命名）: {src_path} -> {target_file}")
-                        transferred_count += 1
+                    
+                    # 使用 FileManagerModule 获取本地存储操作对象进行转移
+                    try:
+                        # 获取本地存储操作对象
+                        from app.modules.filemanager.storages import StorageBase
+                        from app.modules.filemanager.storages.local import LocalStorage
+                        local_storage = LocalStorage()
+                        
+                        # 使用 move 方法转移文件
+                        if local_storage.move(src_fileitem, target_folder, target_file.name):
+                            logger.info(f"转移文件成功: {src_path} -> {target_file}")
+                            transferred_count += 1
+                        else:
+                            raise Exception(f"使用存储操作对象转移文件失败")
+                    except Exception as e:
+                        logger.error(f"转移文件失败: {src_path} -> {target_file}, 错误: {str(e)}")
+                        # 如果使用存储操作对象失败，回退到 shutil.move
+                        try:
+                            shutil.move(str(src_path), str(target_file))
+                            logger.info(f"转移文件成功（回退方法）: {src_path} -> {target_file}")
+                            transferred_count += 1
+                        except Exception as e2:
+                            logger.error(f"转移文件失败（回退方法）: {src_path} -> {target_file}, 错误: {str(e2)}")
+                            raise
+                elif not src_path.exists() and src_fileitem.storage == "local":
+                    logger.warning(f"本地文件不存在: {src_path}, 存储类型: {src_fileitem.storage}")
+                    raise Exception(f"源文件不存在: {src_path}")
                 else:
                     # 非本地文件，使用 StorageChain 下载后转移
-                    from app.schemas import FileItem
+                    logger.info(f"处理非本地文件: {src_fileitem.path}, 存储类型: {src_fileitem.storage}")
                     # 下载文件到本地临时位置
+                    logger.debug(f"开始下载文件: {src_fileitem.path}")
                     local_file = storage_chain.download_file(src_fileitem)
                     if local_file and local_file.exists():
+                        logger.debug(f"文件下载成功: {local_file}")
                         target_file = target_folder / Path(src_fileitem.path).name
                         if target_file.exists():
                             # 文件已存在，添加时间戳
+                            logger.warning(f"目标文件已存在，将重命名: {target_file}")
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             name_parts = target_file.stem, timestamp, target_file.suffix
                             new_name = f"{name_parts[0]}_{name_parts[1]}{name_parts[2]}"
                             target_file = target_folder / new_name
-                        shutil.move(str(local_file), str(target_file))
-                        logger.info(f"转移文件: {src_fileitem.path} -> {target_file}")
-                        transferred_count += 1
-                        # 删除源文件
-                        storage_chain.delete_file(src_fileitem)
+                        try:
+                            shutil.move(str(local_file), str(target_file))
+                            logger.info(f"转移文件成功: {src_fileitem.path} -> {target_file}")
+                            transferred_count += 1
+                            # 删除源文件
+                            logger.debug(f"删除源文件: {src_fileitem.path}")
+                            storage_chain.delete_file(src_fileitem)
+                        except Exception as e:
+                            logger.error(f"转移文件失败: {local_file} -> {target_file}, 错误: {str(e)}")
+                            raise
                     else:
-                        raise Exception(f"无法下载文件: {src_fileitem.path}")
+                        error_msg = f"无法下载文件: {src_fileitem.path}, 下载结果: {local_file}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
             
             # 如果源文件是文件夹，遍历其中的所有文件
             elif src_fileitem.type == "dir":
                 src_path = Path(src_fileitem.path)
                 # 检查是否是本地文件夹
                 if src_fileitem.storage == "local" and src_path.exists() and src_path.is_dir():
+                    logger.debug(f"处理本地文件夹: {src_path}")
+                    # 获取本地存储操作对象
+                    from app.modules.filemanager.storages.local import LocalStorage
+                    local_storage = LocalStorage()
+                    
                     # 遍历文件夹中的所有文件（递归）
                     for root, dirs, files in os.walk(src_path):
                         for file in files:
@@ -571,20 +613,45 @@ class FileSweeper(_PluginBase):
                             
                             # 如果目标文件已存在，添加时间戳
                             if target_file.exists():
+                                logger.warning(f"目标文件已存在，将重命名: {target_file}")
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 name_parts = target_file.stem, timestamp, target_file.suffix
                                 new_name = f"{name_parts[0]}_{name_parts[1]}{name_parts[2]}"
                                 target_file = target_folder / new_name
                             
-                            shutil.move(str(src_file), str(target_file))
-                            logger.info(f"转移文件: {src_file} -> {target_file}")
-                            transferred_count += 1
+                            try:
+                                # 使用 LocalStorage 的 move 方法转移文件
+                                from app.schemas import FileItem
+                                src_fileitem_local = FileItem(
+                                    storage="local",
+                                    path=str(src_file),
+                                    name=src_file.name,
+                                    type="file"
+                                )
+                                if local_storage.move(src_fileitem_local, target_folder, target_file.name):
+                                    logger.info(f"转移文件成功: {src_file} -> {target_file}")
+                                    transferred_count += 1
+                                else:
+                                    # 如果使用存储操作对象失败，回退到 shutil.move
+                                    shutil.move(str(src_file), str(target_file))
+                                    logger.info(f"转移文件成功（回退方法）: {src_file} -> {target_file}")
+                                    transferred_count += 1
+                            except Exception as e:
+                                logger.error(f"转移文件失败: {src_file} -> {target_file}, 错误: {str(e)}")
+                                raise
+                elif not src_path.exists():
+                    logger.warning(f"本地文件夹不存在: {src_path}, 存储类型: {src_fileitem.storage}")
+                    raise Exception(f"源文件夹不存在: {src_path}")
                 else:
                     # 非本地文件夹，使用 StorageChain 列出文件
+                    logger.info(f"处理非本地文件夹: {src_fileitem.path}, 存储类型: {src_fileitem.storage}")
+                    logger.debug(f"开始列出文件夹中的文件: {src_fileitem.path}")
                     files = storage_chain.list_files(src_fileitem, recursion=True)
                     if files:
+                        logger.debug(f"找到 {len(files)} 个文件/文件夹")
                         for file_item in files:
                             if file_item.type == "file":
+                                logger.debug(f"处理文件: {file_item.path}")
                                 # 下载文件到本地临时位置
                                 local_file = storage_chain.download_file(file_item)
                                 if local_file and local_file.exists():
@@ -592,23 +659,37 @@ class FileSweeper(_PluginBase):
                                     target_file = target_folder / Path(file_item.path).name
                                     if target_file.exists():
                                         # 文件已存在，添加时间戳
+                                        logger.warning(f"目标文件已存在，将重命名: {target_file}")
                                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                         name_parts = target_file.stem, timestamp, target_file.suffix
                                         new_name = f"{name_parts[0]}_{name_parts[1]}{name_parts[2]}"
                                         target_file = target_folder / new_name
-                                    shutil.move(str(local_file), str(target_file))
-                                    logger.info(f"转移文件: {file_item.path} -> {target_file}")
-                                    transferred_count += 1
-                                    # 删除源文件
-                                    storage_chain.delete_file(file_item)
+                                    try:
+                                        shutil.move(str(local_file), str(target_file))
+                                        logger.info(f"转移文件成功: {file_item.path} -> {target_file}")
+                                        transferred_count += 1
+                                        # 删除源文件
+                                        logger.debug(f"删除源文件: {file_item.path}")
+                                        storage_chain.delete_file(file_item)
+                                    except Exception as e:
+                                        logger.error(f"转移文件失败: {local_file} -> {target_file}, 错误: {str(e)}")
+                                        raise
+                                else:
+                                    logger.warning(f"无法下载文件: {file_item.path}, 下载结果: {local_file}")
                     else:
-                        raise Exception(f"无法列出文件夹中的文件: {src_fileitem.path}")
+                        error_msg = f"无法列出文件夹中的文件: {src_fileitem.path}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
             
+            logger.info(f"转移文件成功: {src_fileitem.path} -> {target_dir}/{folder_name}, 转移文件数: {transferred_count}")
             return True, "", transferred_count
             
         except Exception as e:
-            error_msg = f"转移文件失败: {str(e)}"
+            import traceback
+            error_detail = traceback.format_exc()
+            error_msg = f"转移文件失败: {src_fileitem.path} -> {target_dir}/{folder_name}, 错误: {str(e)}"
             logger.error(error_msg)
+            logger.error(f"转移失败详细错误信息:\n{error_detail}")
             return False, error_msg, 0
     
     def _clean_failed_transfer_files(self) -> Dict[str, Any]:
@@ -689,12 +770,13 @@ class FileSweeper(_PluginBase):
                                             folder_name = f"failed_transfer_{transfer.id}"
                                         
                                         # 转移文件
+                                        logger.info(f"准备转移文件: {src_fileitem.path}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
                                         success, error_msg, transferred_count = self._transfer_file_to_target(
                                             src_fileitem, self._transfer_target_dir, folder_name
                                         )
                                         
                                         if success:
-                                            logger.info(f"转移转移失败文件: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}")
+                                            logger.info(f"转移转移失败文件成功: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}, 转移文件数: {transferred_count}")
                                             
                                             # 检查原文件夹是否为空，如果为空则删除
                                             if src_fileitem.type == "dir":
@@ -720,6 +802,7 @@ class FileSweeper(_PluginBase):
                                             
                                             # 删除转移记录
                                             TransferHistory.delete(db, transfer.id)
+                                            logger.info(f"已删除转移记录: ID={transfer.id}, 标题={transfer.title}")
                                             
                                             cleaned_files.append({
                                                 "path": src_fileitem.path,
@@ -732,7 +815,9 @@ class FileSweeper(_PluginBase):
                                             })
                                             total_size += file_size
                                         else:
-                                            logger.error(error_msg)
+                                            logger.error(f"转移文件失败: {src_fileitem.path}")
+                                            logger.error(f"转移失败详情: {error_msg}")
+                                            logger.error(f"转移记录信息 - ID: {transfer.id}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
                                             errors.append(error_msg)
                                     elif should_delete:
                                         # 删除模式
@@ -806,7 +891,6 @@ class FileSweeper(_PluginBase):
                                 logger.warning(f"转移记录 {transfer.id} 的 src_fileitem 格式错误")
                         else:
                             logger.warning(f"转移记录 {transfer.id} 没有源文件信息")
-                            
                     except Exception as e:
                         error_msg = f"处理转移失败记录 {transfer.id} 时发生错误: {str(e)}"
                         logger.error(error_msg)
