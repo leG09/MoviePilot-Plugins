@@ -34,7 +34,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除或转移MoviePilot转移失败的文件，支持智能模式根据失败原因自动决定删除或转移"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.5"
+    plugin_version = "2.6"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -788,10 +788,22 @@ class FileSweeper(_PluginBase):
                                             errors.append(error_msg)
                                             continue
                                         
-                                        # 生成文件夹名称（使用标题或路径名）
-                                        folder_name = transfer.title or Path(src_fileitem.path).stem
+                                        # 生成文件夹名称（使用原始文件夹名称）
+                                        src_path = Path(src_fileitem.path)
+                                        if src_fileitem.type == "file":
+                                            # 如果是文件，使用其父目录名称
+                                            folder_name = src_path.parent.name
+                                        else:
+                                            # 如果是文件夹，使用文件夹名称
+                                            folder_name = src_path.name
+                                        
+                                        # 如果文件夹名称为空，使用备用方案
+                                        if not folder_name or folder_name == ".":
+                                            folder_name = transfer.title or src_path.stem
                                         if not folder_name:
                                             folder_name = f"failed_transfer_{transfer.id}"
+                                        
+                                        logger.info(f"使用原始文件夹名称: {folder_name}")
                                         
                                         # 转移文件
                                         logger.info(f"准备转移文件: {src_fileitem.path}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
@@ -815,24 +827,31 @@ class FileSweeper(_PluginBase):
                                                     except Exception as e:
                                                         logger.warning(f"检查或删除空文件夹失败: {src_fileitem.path}, {str(e)}")
                                             
+                                            # 在删除记录前保存需要的信息
+                                            transfer_id = transfer.id
+                                            transfer_title = transfer.title
+                                            transfer_date = transfer.date
+                                            transfer_src = transfer.src
+                                            transfer_hash = transfer.download_hash
+                                            
                                             # 发送下载文件删除事件（因为文件已转移，相当于删除）
                                             eventmanager.send_event(
                                                 EventType.DownloadFileDeleted,
                                                 {
-                                                    "src": transfer.src,
-                                                    "hash": transfer.download_hash
+                                                    "src": transfer_src,
+                                                    "hash": transfer_hash
                                                 }
                                             )
                                             
                                             # 删除转移记录
-                                            TransferHistory.delete(db, transfer.id)
-                                            logger.info(f"已删除转移记录: ID={transfer.id}, 标题={transfer.title}")
+                                            TransferHistory.delete(db, transfer_id)
+                                            logger.info(f"已删除转移记录: ID={transfer_id}, 标题={transfer_title}")
                                             
                                             cleaned_files.append({
                                                 "path": src_fileitem.path,
                                                 "size": file_size,
-                                                "modified": transfer.date,
-                                                "title": transfer.title,
+                                                "modified": transfer_date,
+                                                "title": transfer_title,
                                                 "type": "failed_transfer",
                                                 "transferred_to": f"{self._transfer_target_dir}/{folder_name}",
                                                 "transferred_count": transferred_count
@@ -851,30 +870,37 @@ class FileSweeper(_PluginBase):
                                         if success:
                                             logger.info(f"删除转移失败文件: {src_fileitem.path}")
 
+                                            # 在删除记录前保存需要的信息
+                                            transfer_id = transfer.id
+                                            transfer_title = transfer.title
+                                            transfer_date = transfer.date
+                                            transfer_src = transfer.src
+                                            transfer_hash = transfer.download_hash
+                                            transfer_errmsg = transfer.errmsg or ""
+
                                             # 发送下载文件删除事件
                                             eventmanager.send_event(
                                                 EventType.DownloadFileDeleted,
                                                 {
-                                                    "src": transfer.src,
-                                                    "hash": transfer.download_hash
+                                                    "src": transfer_src,
+                                                    "hash": transfer_hash
                                                 }
                                             )
 
                                             # 删除转移记录（仅在删除成功后）
-                                            TransferHistory.delete(db, transfer.id)
+                                            TransferHistory.delete(db, transfer_id)
 
                                             # 记录删除原因
                                             reason = None
                                             if self._smart_mode:
-                                                errmsg = transfer.errmsg or ""
-                                                if "存在同名文件" in errmsg or "同名文件" in errmsg:
+                                                if "存在同名文件" in transfer_errmsg or "同名文件" in transfer_errmsg:
                                                     reason = "duplicate"
                                             
                                             cleaned_files.append({
                                                 "path": src_fileitem.path,
                                                 "size": file_size,
-                                                "modified": transfer.date,
-                                                "title": transfer.title,
+                                                "modified": transfer_date,
+                                                "title": transfer_title,
                                                 "type": "failed_transfer",
                                                 "reason": reason
                                             })
@@ -885,20 +911,29 @@ class FileSweeper(_PluginBase):
                                             errors.append(error_msg)
                                 else:
                                     # 预览模式
+                                    # 生成文件夹名称（使用原始文件夹名称）
+                                    src_path = Path(src_fileitem.path)
+                                    if src_fileitem.type == "file":
+                                        # 如果是文件，使用其父目录名称
+                                        folder_name = src_path.parent.name
+                                    else:
+                                        # 如果是文件夹，使用文件夹名称
+                                        folder_name = src_path.name
+                                    
+                                    # 如果文件夹名称为空，使用备用方案
+                                    if not folder_name or folder_name == ".":
+                                        folder_name = transfer.title or src_path.stem
+                                    if not folder_name:
+                                        folder_name = f"failed_transfer_{transfer.id}"
+                                    
                                     # 智能模式预览
                                     if self._smart_mode:
                                         errmsg = transfer.errmsg or ""
                                         if "存在同名文件" in errmsg or "同名文件" in errmsg:
                                             logger.info(f"[预览] 将删除转移失败文件（同名文件）: {src_fileitem.path}")
                                         else:
-                                            folder_name = transfer.title or Path(src_fileitem.path).stem
-                                            if not folder_name:
-                                                folder_name = f"failed_transfer_{transfer.id}"
                                             logger.info(f"[预览] 将转移转移失败文件: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}")
                                     elif self._transfer_mode == "transfer":
-                                        folder_name = transfer.title or Path(src_fileitem.path).stem
-                                        if not folder_name:
-                                            folder_name = f"failed_transfer_{transfer.id}"
                                         logger.info(f"[预览] 将转移转移失败文件: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}")
                                     else:
                                         logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
@@ -927,7 +962,7 @@ class FileSweeper(_PluginBase):
                 
             finally:
                 db.close()
-                            
+            
         except Exception as e:
             error_msg = f"清理转移失败文件时发生错误: {str(e)}"
             logger.error(error_msg)
