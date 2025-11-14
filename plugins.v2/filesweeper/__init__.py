@@ -34,7 +34,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除或转移MoviePilot转移失败的文件，支持智能模式根据失败原因自动决定删除或转移"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.4"
+    plugin_version = "2.5"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -709,31 +709,55 @@ class FileSweeper(_PluginBase):
             cutoff_time = datetime.now() - timedelta(hours=float(self._failed_transfer_age_hours))
             cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
             
-            logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str}")
+            logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str} (N小时前: {self._failed_transfer_age_hours})")
             
             # 创建数据库会话
             db = SessionFactory()
             try:
-                # 查询转移失败的记录
+                # 先查询所有失败记录用于调试
+                all_failed = db.query(TransferHistory).filter(
+                    TransferHistory.status == False
+                ).all()
+                logger.info(f"数据库中总共有 {len(all_failed)} 条转移失败记录")
+                
+                # 打印所有失败记录的详细信息用于调试
+                if all_failed:
+                    logger.info("所有失败记录详情:")
+                    for idx, t in enumerate(all_failed[:10], 1):  # 只显示前10条
+                        logger.info(f"  记录 {idx}: ID={t.id}, 日期={t.date}, 标题={t.title}, 错误={t.errmsg[:50] if t.errmsg else 'None'}")
+                
+                # 查询转移失败的记录（使用datetime对象比较）
                 failed_transfers = db.query(TransferHistory).filter(
                     and_(
                         TransferHistory.status == False,  # 转移失败
-                        TransferHistory.date <= cutoff_time_str  # 超过指定时间
+                        TransferHistory.date <= cutoff_time  # 超过指定时间（使用datetime对象）
                     )
                 ).all()
                 
-                logger.info(f"找到 {len(failed_transfers)} 条转移失败记录")
+                logger.info(f"找到 {len(failed_transfers)} 条符合条件的转移失败记录（超过{self._failed_transfer_age_hours}小时）")
                 
                 for transfer in failed_transfers:
                     try:
+                        logger.info(f"处理转移失败记录: ID={transfer.id}, 标题={transfer.title}, 日期={transfer.date}, 错误={transfer.errmsg}")
+                        
                         # 处理源文件
                         if transfer.src_fileitem:
                             src_fileitem_data = transfer.src_fileitem
+                            logger.debug(f"源文件数据: {src_fileitem_data}")
+                            
                             if isinstance(src_fileitem_data, dict):
                                 from app.schemas import FileItem
-                                src_fileitem = FileItem(**src_fileitem_data)
+                                try:
+                                    src_fileitem = FileItem(**src_fileitem_data)
+                                    logger.info(f"解析源文件项成功: 路径={src_fileitem.path}, 类型={src_fileitem.type}, 存储={src_fileitem.storage}")
+                                except Exception as e:
+                                    logger.error(f"解析源文件项失败: {str(e)}, 数据: {src_fileitem_data}")
+                                    errors.append(f"解析源文件项失败: {str(e)}")
+                                    continue
+                                
                                 # 读取大小（如有）用于统计
                                 file_size = int(src_fileitem_data.get("size", 0)) if isinstance(src_fileitem_data.get("size", 0), (int, float)) else 0
+                                logger.debug(f"文件大小: {file_size}")
                                 
                                 if not self._dry_run:
                                     # 智能模式：根据失败原因决定删除或转移
