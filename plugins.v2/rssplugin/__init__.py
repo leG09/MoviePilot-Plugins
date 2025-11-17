@@ -32,7 +32,7 @@ class RssPlugin(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.0"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -63,7 +63,6 @@ class RssPlugin(_PluginBase):
     _action: str = "subscribe"
     _save_path: str = ""
     _size_range: str = ""
-    _exclude_size_range: str = ""
 
     def init_plugin(self, config: dict = None):
 
@@ -86,7 +85,6 @@ class RssPlugin(_PluginBase):
             self._action = config.get("action")
             self._save_path = config.get("save_path")
             self._size_range = config.get("size_range")
-            self._exclude_size_range = config.get("exclude_size_range")
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -364,28 +362,6 @@ class RssPlugin(_PluginBase):
                                     {
                                         'component': 'VTextField',
                                         'props': {
-                                            'model': 'exclude_size_range',
-                                            'label': '排除大小(GB)',
-                                            'placeholder': '下载模式有效，如：3 或 3-5'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
                                             'model': 'save_path',
                                             'label': '保存目录',
                                             'placeholder': '下载时有效，留空自动'
@@ -462,8 +438,7 @@ class RssPlugin(_PluginBase):
             "filter": False,
             "action": "subscribe",
             "save_path": "",
-            "size_range": "",
-            "exclude_size_range": ""
+            "size_range": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -620,8 +595,7 @@ class RssPlugin(_PluginBase):
             "filter": self._filter,
             "action": self._action,
             "save_path": self._save_path,
-            "size_range": self._size_range,
-            "exclude_size_range": self._exclude_size_range
+            "size_range": self._size_range
         })
 
     def check(self):
@@ -737,15 +711,6 @@ class RssPlugin(_PluginBase):
                         continue
                     # 下载或订阅
                     if self._action == "download":
-                        # 检查排除大小（仅下载模式）
-                        if self._exclude_size_range:
-                            exclude_sizes = [float(_size) * 1024 ** 3 for _size in self._exclude_size_range.split("-")]
-                            if len(exclude_sizes) == 1 and float(size) >= exclude_sizes[0]:
-                                logger.info(f"{title} - 种子大小在排除范围内，跳过下载")
-                                continue
-                            elif len(exclude_sizes) > 1 and exclude_sizes[0] <= float(size) <= exclude_sizes[1]:
-                                logger.info(f"{title} - 种子大小在排除范围内，跳过下载")
-                                continue
                         # 添加下载
                         result = downloadchain.download_single(
                             context=Context(
@@ -812,11 +777,6 @@ class RssPlugin(_PluginBase):
         if size_range and not self.__is_number_or_range(str(size_range)):
             self.__log_and_notify_error(f"自定义订阅出错，种子大小设置错误：{size_range}")
             config["size_range"] = None
-            return False
-        exclude_size_range = config.get("exclude_size_range")
-        if exclude_size_range and not self.__is_number_or_range(str(exclude_size_range)):
-            self.__log_and_notify_error(f"自定义订阅出错，排除大小设置错误：{exclude_size_range}")
-            config["exclude_size_range"] = None
             return False
         return True
 
