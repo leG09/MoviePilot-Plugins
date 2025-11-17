@@ -34,7 +34,7 @@ class QbOptimizer(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.6"
+    plugin_version = "1.7"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -58,6 +58,7 @@ class QbOptimizer(_PluginBase):
     # 功能开关
     _enable_zero_seed_clean = False  # 启用进行中无人做种任务清理
     _enable_timeout_clean = False    # 启用慢速下载任务清理
+    _enable_unrecognized_clean = False  # 启用识别不到媒体信息任务清理
     _enable_auto_redownload = True   # 启用自动重新下载
     
     # 配置参数
@@ -67,6 +68,7 @@ class QbOptimizer(_PluginBase):
     _max_download_slots = 5          # 最大下载槽位
     _max_zero_seed_process = 50      # 每次处理的最大无人做种种子数量
     _max_timeout_process = 50        # 每次处理的最大慢速下载种子数量
+    _max_unrecognized_process = 50   # 每次处理的最大识别不到媒体信息种子数量
     _max_priority_process = 100      # 每次处理的最大优先级优化种子数量
     # 移除优先级提升倍数，改为按做种数排序
     _search_sites = []               # 重新下载时用于搜索的站点ID列表
@@ -110,6 +112,7 @@ class QbOptimizer(_PluginBase):
             # 功能开关
             self._enable_zero_seed_clean = config.get("enable_zero_seed_clean")
             self._enable_timeout_clean = config.get("enable_timeout_clean")
+            self._enable_unrecognized_clean = config.get("enable_unrecognized_clean", False)
             self._enable_auto_redownload = config.get("enable_auto_redownload", True)
             self._search_sites = config.get("search_sites") or []
             self._seeder_metric = 'num_complete'  # 固定使用num_complete字段
@@ -121,6 +124,7 @@ class QbOptimizer(_PluginBase):
             self._max_download_slots = int(config.get("max_download_slots") or 5)
             self._max_zero_seed_process = int(config.get("max_zero_seed_process") or 50)
             self._max_timeout_process = int(config.get("max_timeout_process") or 50)
+            self._max_unrecognized_process = int(config.get("max_unrecognized_process") or 50)
             self._max_priority_process = int(config.get("max_priority_process") or 100)
             # 移除优先级提升倍数配置
             
@@ -154,10 +158,12 @@ class QbOptimizer(_PluginBase):
             logger.info(f"  - 做种数度量: {self._seeder_metric}")
             logger.info(f"  - 清理做种数为0: {self._enable_zero_seed_clean}")
             logger.info(f"  - 清理超时: {self._enable_timeout_clean}")
+            logger.info(f"  - 清理识别不到媒体信息: {self._enable_unrecognized_clean}")
             logger.info(f"  - 做种数阈值: {self._zero_seed_threshold}")
             logger.info(f"  - 慢速下载时长阈值: {self._timeout_hours}小时")
             logger.info(f"  - 最大无人做种处理数: {self._max_zero_seed_process}")
             logger.info(f"  - 最大慢速下载处理数: {self._max_timeout_process}")
+            logger.info(f"  - 最大识别不到媒体信息处理数: {self._max_unrecognized_process}")
             logger.info(f"  - 最大优先级优化处理数: {self._max_priority_process}")
             logger.info(f"  - 优先级策略: 综合评分排序")
             logger.info(f"  - 综合评分开关: {self._enable_score_priority}")
@@ -205,6 +211,7 @@ class QbOptimizer(_PluginBase):
                     "downloaders": self._downloaders,
                     "enable_zero_seed_clean": self._enable_zero_seed_clean,
                     "enable_timeout_clean": self._enable_timeout_clean,
+                    "enable_unrecognized_clean": self._enable_unrecognized_clean,
                     "enable_auto_redownload": self._enable_auto_redownload,
                     "search_sites": self._search_sites,
                     "zero_seed_threshold": self._zero_seed_threshold,
@@ -213,6 +220,7 @@ class QbOptimizer(_PluginBase):
                     "max_download_slots": self._max_download_slots,
                     "max_zero_seed_process": self._max_zero_seed_process,
                     "max_timeout_process": self._max_timeout_process,
+                    "max_unrecognized_process": self._max_unrecognized_process,
                     "max_priority_process": self._max_priority_process,
                     # 综合评分配置
                     "enable_score_priority": self._enable_score_priority,
@@ -556,6 +564,7 @@ class QbOptimizer(_PluginBase):
         total_zero_seed_removed = 0
         total_priority_boosted = 0
         total_timeout_removed = 0
+        total_unrecognized_removed = 0
         all_failed_torrents = []  # 收集所有重新下载失败的种子
         
         for downloader_name in self._downloaders:
@@ -610,6 +619,7 @@ class QbOptimizer(_PluginBase):
                     zero_seed_removed, zero_seed_failed = self._clean_zero_seed_torrents(downloader_obj, all_torrents, downloader_name)
                     priority_boosted = self._boost_priority_torrents(downloader_obj, all_torrents, downloader_name)
                     timeout_removed, timeout_failed = self._clean_timeout_torrents(downloader_obj, all_torrents, downloader_name)
+                    unrecognized_removed = self._clean_unrecognized_torrents(downloader_obj, all_torrents, downloader_name)
                     
                     # 执行磁盘空间和I/O监控
                     disk_monitor_result = self._monitor_disk_and_io(downloader_obj, downloader_name)
@@ -620,6 +630,7 @@ class QbOptimizer(_PluginBase):
                     total_zero_seed_removed += zero_seed_removed
                     total_priority_boosted += priority_boosted
                     total_timeout_removed += timeout_removed
+                    total_unrecognized_removed += unrecognized_removed
                     
                     # 收集重新下载失败信息
                     all_failed_torrents.extend(zero_seed_failed)
@@ -629,6 +640,7 @@ class QbOptimizer(_PluginBase):
                     logger.info(f"  - 清理下载中无人做种: {zero_seed_removed}个")
                     logger.info(f"  - 综合评分优化: {priority_boosted}个")
                     logger.info(f"  - 清理慢速下载: {timeout_removed}个")
+                    logger.info(f"  - 清理识别不到媒体信息: {unrecognized_removed}个")
 
             except Exception as e:
                 logger.error(f"【QB种子优化】处理下载器 {downloader_name} 时发生异常：{str(e)}")
@@ -640,14 +652,16 @@ class QbOptimizer(_PluginBase):
         logger.info(f"  - 清理下载中无人做种: {total_zero_seed_removed}个")
         logger.info(f"  - 综合评分优化: {total_priority_boosted}个")
         logger.info(f"  - 清理慢速下载: {total_timeout_removed}个")
+        logger.info(f"  - 清理识别不到媒体信息: {total_unrecognized_removed}个")
         logger.info(f"  - 重新下载失败: {len(all_failed_torrents)}个")
         
         # 输出详细总结信息
-        if total_zero_seed_removed > 0 or total_timeout_removed > 0:
+        if total_zero_seed_removed > 0 or total_timeout_removed > 0 or total_unrecognized_removed > 0:
             logger.info(f"【QB种子优化】本次清理总结:")
-            logger.info(f"  清理种子总数: {total_zero_seed_removed + total_timeout_removed}个")
+            logger.info(f"  清理种子总数: {total_zero_seed_removed + total_timeout_removed + total_unrecognized_removed}个")
             logger.info(f"  - 清理下载中无人做种: {total_zero_seed_removed}个")
             logger.info(f"  - 清理慢速下载: {total_timeout_removed}个")
+            logger.info(f"  - 清理识别不到媒体信息: {total_unrecognized_removed}个")
             
             if all_failed_torrents:
                 logger.warning(f"【QB种子优化】重新下载失败总结: 共{len(all_failed_torrents)}个种子未找到资源")
@@ -660,9 +674,10 @@ class QbOptimizer(_PluginBase):
                 # 发送通知
                 if self._notify:
                     summary_message = f"【QB种子优化完成】\n"
-                    summary_message += f"本次清理种子: {total_zero_seed_removed + total_timeout_removed}个\n"
+                    summary_message += f"本次清理种子: {total_zero_seed_removed + total_timeout_removed + total_unrecognized_removed}个\n"
                     summary_message += f"  - 清理下载中无人做种: {total_zero_seed_removed}个\n"
                     summary_message += f"  - 清理慢速下载: {total_timeout_removed}个\n"
+                    summary_message += f"  - 清理识别不到媒体信息: {total_unrecognized_removed}个\n"
                     summary_message += f"重新下载失败: {len(all_failed_torrents)}个\n\n"
                     summary_message += "失败种子列表:\n"
                     for i, failed_torrent in enumerate(all_failed_torrents, 1):
@@ -671,7 +686,7 @@ class QbOptimizer(_PluginBase):
                         summary_message += f"   大小: {failed_torrent['size']}\n"
                         summary_message += f"   原因: {failed_torrent['reason']}\n\n"
                     
-                    logger.info(f"【QB种子优化】发送总结通知: 清理{total_zero_seed_removed + total_timeout_removed}个，失败{len(all_failed_torrents)}个")
+                    logger.info(f"【QB种子优化】发送总结通知: 清理{total_zero_seed_removed + total_timeout_removed + total_unrecognized_removed}个，失败{len(all_failed_torrents)}个")
                     self.post_message(
                         mtype=NotificationType.Manual,
                         title=f"【QB种子优化】清理完成 - {len(all_failed_torrents)}个种子未找到资源",
@@ -680,7 +695,7 @@ class QbOptimizer(_PluginBase):
             else:
                 logger.info(f"【QB种子优化】重新下载成功总结: 清理的{total_zero_seed_removed + total_timeout_removed}个种子全部重新下载成功")
                 if self._notify:
-                    logger.info(f"【QB种子优化】清理{total_zero_seed_removed + total_timeout_removed}个种子，全部重新下载成功，无需发送通知")
+                    logger.info(f"【QB种子优化】清理{total_zero_seed_removed + total_timeout_removed + total_unrecognized_removed}个种子，全部重新下载成功，无需发送通知")
         else:
             logger.info(f"【QB种子优化】本次无清理操作，无需发送通知")
 
@@ -1510,6 +1525,110 @@ class QbOptimizer(_PluginBase):
                 logger.warning(f"     - 原因: {failed_torrent['reason']}")
         
         return len(timeout_torrents), redownload_failed_torrents
+
+    def _clean_unrecognized_torrents(self, downloader_obj, torrents, downloader_name):
+        """
+        清理下载中识别不到媒体信息的任务
+        """
+        logger.info(f"【功能6-识别不到媒体信息】开始清理识别不到媒体信息的任务，功能开关: {self._enable_unrecognized_clean}")
+        
+        if not self._enable_unrecognized_clean:
+            logger.info("【功能6-识别不到媒体信息】清理识别不到媒体信息功能已禁用，跳过")
+            return 0
+            
+        logger.info(f"【功能6-识别不到媒体信息】检查条件: 目标状态=downloading/stalledDL/metadl")
+        
+        unrecognized_torrents = []
+        checked_count = 0
+        media_chain = MediaChain()
+        
+        for torrent in torrents:
+            checked_count += 1
+            logger.debug(f"【功能6-识别不到媒体信息】检查种子 {checked_count}/{len(torrents)}: {torrent.name}")
+            
+            # 仅处理 downloading、stalledDL 或 metadl 状态
+            state_name = getattr(torrent, 'state', '') or ''
+            state_lower = state_name.lower()
+            is_target_state = state_lower in ('downloading', 'stalleddl', 'metadl')
+            
+            if not is_target_state:
+                continue
+            
+            # 尝试识别媒体信息
+            try:
+                torrent_name = getattr(torrent, 'name', '')
+                if not torrent_name:
+                    logger.debug(f"【功能6-识别不到媒体信息】种子名称为空，跳过: {torrent.hash}")
+                    continue
+                
+                # 使用 MetaInfo 和 MediaChain 识别媒体信息
+                metainfo = MetaInfo(torrent_name)
+                mediainfo = media_chain.recognize_by_meta(metainfo)
+                
+                if not mediainfo:
+                    logger.info(f"【功能6-识别不到媒体信息】种子识别不到媒体信息: {torrent_name}")
+                    logger.info(f"  - 状态: {state_name}")
+                    logger.info(f"  - HASH: {getattr(torrent, 'hash', 'N/A')}")
+                    logger.info(f"  - 下载进度: {getattr(torrent, 'progress', 0) * 100:.1f}%")
+                    logger.info(f"  - 大小: {StringUtils.str_filesize(getattr(torrent, 'size', 0))}")
+                    unrecognized_torrents.append(torrent)
+                else:
+                    logger.debug(f"【功能6-识别不到媒体信息】种子识别到媒体信息: {torrent_name} -> {mediainfo.title_year}")
+                    
+            except Exception as e:
+                logger.warning(f"【功能6-识别不到媒体信息】识别媒体信息异常: {torrent.name}, 错误: {str(e)}")
+                # 识别异常时，保守处理，不删除
+                continue
+        
+        logger.info(f"【功能6-识别不到媒体信息】检查完成，发现{len(unrecognized_torrents)}个识别不到媒体信息的任务")
+        
+        # 根据配置限制处理数量
+        if len(unrecognized_torrents) > self._max_unrecognized_process:
+            logger.info(f"【功能6-识别不到媒体信息】种子数量({len(unrecognized_torrents)})超过配置限制({self._max_unrecognized_process})，只处理前{self._max_unrecognized_process}个")
+            unrecognized_torrents = unrecognized_torrents[:self._max_unrecognized_process]
+        
+        if unrecognized_torrents:
+            logger.info(f"【功能6-识别不到媒体信息】开始删除识别不到媒体信息的任务...")
+            for i, torrent in enumerate(unrecognized_torrents, 1):
+                logger.info(f"【功能6-识别不到媒体信息】删除审计-开始 ({i}/{len(unrecognized_torrents)}): {torrent.name}")
+                logger.info(f"  - HASH: {getattr(torrent, 'hash', 'N/A')}")
+                logger.info(f"  - 状态: {getattr(torrent, 'state', 'unknown')}")
+                logger.info(f"  - 下载进度: {getattr(torrent, 'progress', 0) * 100:.1f}%")
+                logger.info(f"  - 大小: {StringUtils.str_filesize(getattr(torrent, 'size', 0))}")
+                logger.info(f"  - 分类: {getattr(torrent, 'category', 'N/A')}")
+                logger.info(f"  - 标签: {getattr(torrent, 'tags', 'N/A')}")
+                logger.info(f"  - Tracker: {getattr(torrent, 'tracker', 'N/A')}")
+                
+                try:
+                    # 删除种子和文件
+                    torrent_hash = getattr(torrent, 'hash', '')
+                    logger.info(f"【功能6-识别不到媒体信息】准备删除种子和文件: {torrent.name}, HASH: {torrent_hash}")
+                    
+                    # 尝试直接使用 qBittorrent API 删除，确保文件被删除
+                    try:
+                        if hasattr(downloader_obj, 'qbc') and downloader_obj.qbc:
+                            # 直接使用 qBittorrent API 删除，delete_files=True 表示删除文件
+                            downloader_obj.qbc.torrents_delete(delete_files=True, torrent_hashes=torrent_hash)
+                            logger.info(f"【功能6-识别不到媒体信息】通过 qBittorrent API 删除成功: {torrent.name}")
+                            result = True
+                        else:
+                            # 回退到使用封装方法
+                            result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                            logger.info(f"【功能6-识别不到媒体信息】通过封装方法删除: {torrent.name}, 结果: {result}")
+                    except Exception as e:
+                        logger.error(f"【功能6-识别不到媒体信息】删除种子异常: {torrent.name}, 错误: {str(e)}")
+                        # 回退到使用封装方法
+                        result = downloader_obj.delete_torrents(delete_file=True, ids=[torrent.hash])
+                    
+                    if result:
+                        logger.info(f"【功能6-识别不到媒体信息】删除审计-成功: {torrent.name} (HASH={torrent_hash})，已删除种子与数据文件")
+                    else:
+                        logger.error(f"【功能6-识别不到媒体信息】删除审计-失败: {torrent.name} (HASH={getattr(torrent, 'hash', 'N/A')})")
+                    
+                except Exception as e:
+                    logger.error(f"【功能6-识别不到媒体信息】删除审计-异常: {torrent.name} (HASH={getattr(torrent, 'hash', 'N/A')}), 错误: {str(e)}")
+        
+        return len(unrecognized_torrents)
 
     def _check_system_status_once(self, qb_client, check_disk_space=True):
         """
@@ -2785,6 +2904,66 @@ class QbOptimizer(_PluginBase):
                         ]
                     },
                     
+                    # 识别不到媒体信息任务配置组
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VDivider',
+                                        'props': {
+                                            'text': '清理识别不到媒体信息任务'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'enable_unrecognized_clean',
+                                            'label': '启用识别不到媒体信息清理',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'max_unrecognized_process',
+                                            'label': '每次处理数量',
+                                            'placeholder': '50',
+                                            'type': 'number'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    
                     # 综合评分优先级配置组
                     {
                         'component': 'VRow',
@@ -3278,12 +3457,14 @@ class QbOptimizer(_PluginBase):
             "enable_zero_seed_clean": True,
             "enable_priority_boost": True,
             "enable_timeout_clean": True,
+            "enable_unrecognized_clean": False,
             "enable_auto_redownload": True,
             "zero_seed_threshold": 0,
             "timeout_hours": 24,
             "max_download_slots": 5,
             "max_zero_seed_process": 50,
             "max_timeout_process": 50,
+            "max_unrecognized_process": 50,
             "max_priority_process": 100,
             # 综合评分配置
             "enable_score_priority": True,
