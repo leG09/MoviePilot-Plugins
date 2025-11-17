@@ -15,7 +15,7 @@ from app.chain.download import DownloadChain
 from app.chain.subscribe import SubscribeChain
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
-from app.core.metainfo import MetaInfo, MetaInfoPath
+from app.core.metainfo import MetaInfo
 from app.helper.rss import RssHelper
 from app.log import logger
 from app.plugins import _PluginBase
@@ -725,12 +725,8 @@ class RssPlugin(_PluginBase):
                             except Exception:
                                 pass
                         
-                        # 使用文件名创建 MetaInfoPath 进行识别
-                        file_meta = MetaInfoPath(Path(filename))
-                        if not file_meta.name:
-                            logger.info(f"{title} 文件名无法识别有效信息，跳过下载")
-                            continue
-                        
+                        # 使用文件名创建 MetaInfo 进行识别
+                        file_meta = MetaInfo(title=filename)
                         # 识别媒体信息
                         file_mediainfo: MediaInfo = self.chain.recognize_media(meta=file_meta)
                         if not file_mediainfo:
