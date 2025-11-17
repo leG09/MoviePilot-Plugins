@@ -4,6 +4,7 @@ import traceback
 from pathlib import Path
 from threading import Lock
 from typing import Optional, Any, List, Dict, Tuple
+from urllib.parse import urlparse, unquote
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -14,7 +15,7 @@ from app.chain.download import DownloadChain
 from app.chain.subscribe import SubscribeChain
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
-from app.core.metainfo import MetaInfo
+from app.core.metainfo import MetaInfo, MetaInfoPath
 from app.helper.rss import RssHelper
 from app.log import logger
 from app.plugins import _PluginBase
@@ -711,6 +712,31 @@ class RssPlugin(_PluginBase):
                         continue
                     # 下载或订阅
                     if self._action == "download":
+                        # 下载模式下，使用文件名再次识别，识别失败则过滤
+                        # 从 title 或 enclosure 中提取文件名
+                        filename = title
+                        if enclosure:
+                            # 尝试从 enclosure URL 中提取文件名
+                            try:
+                                parsed_url = urlparse(enclosure)
+                                url_filename = unquote(parsed_url.path.split('/')[-1])
+                                if url_filename and url_filename != parsed_url.path:
+                                    filename = url_filename
+                            except Exception:
+                                pass
+                        
+                        # 使用文件名创建 MetaInfoPath 进行识别
+                        file_meta = MetaInfoPath(Path(filename))
+                        if not file_meta.name:
+                            logger.info(f"{title} 文件名无法识别有效信息，跳过下载")
+                            continue
+                        
+                        # 识别媒体信息
+                        file_mediainfo: MediaInfo = self.chain.recognize_media(meta=file_meta)
+                        if not file_mediainfo:
+                            logger.info(f"{title} 文件名识别失败，跳过下载")
+                            continue
+                        
                         # 添加下载
                         result = downloadchain.download_single(
                             context=Context(
