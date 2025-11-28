@@ -1998,6 +1998,21 @@ class QbOptimizer(_PluginBase):
                 # 统计状态用于调试
                 state_counter[state_name] = state_counter.get(state_name, 0) + 1
                 
+                # 首先检测暂停状态（优先级最高，避免被误判为下载中）
+                # stoppedDL = 暂停下载, stoppedUP = 暂停上传, paused = 暂停
+                is_paused = (state_lower == 'stoppeddl' or 
+                           state_lower == 'stoppedup' or
+                           state_lower == 'pauseddl' or
+                           state_lower == 'pausedup' or
+                           state_lower == 'paused' or
+                           'stopped' in state_lower or
+                           'paused' in state_lower)
+                
+                # 如果已确认为暂停状态，直接加入暂停列表
+                if is_paused:
+                    paused_torrents.append(torrent)
+                    continue
+                
                 # 检测下载中的种子：优先使用 state_enum（更可靠）
                 is_downloading = False
                 try:
@@ -2007,11 +2022,12 @@ class QbOptimizer(_PluginBase):
                     pass
                 
                 # 如果 state_enum 不可用，使用字符串匹配
-                if not is_downloading:
-                    is_downloading = ('downloading' in state_lower or 
-                                    'stalleddl' in state_lower or 
-                                    'metadl' in state_lower or
-                                    'queueddl' in state_lower)
+                # 注意：排除 stoppedDL 等暂停状态
+                if not is_downloading and not is_paused:
+                    is_downloading = (state_lower == 'downloading' or 
+                                    state_lower == 'stalleddl' or 
+                                    state_lower == 'metadl' or
+                                    state_lower == 'queueddl')
                 
                 # 检测做种中的种子
                 is_uploading = False
@@ -2021,16 +2037,16 @@ class QbOptimizer(_PluginBase):
                 except Exception:
                     pass
                 
-                if not is_uploading:
-                    is_uploading = ('uploading' in state_lower or 
-                                  'stalledup' in state_lower or 
-                                  'queuedup' in state_lower)
+                if not is_uploading and not is_paused:
+                    is_uploading = (state_lower == 'uploading' or 
+                                  state_lower == 'stalledup' or 
+                                  state_lower == 'queuedup')
                 
                 # 分类种子
                 if is_downloading:
                     downloading_torrents.append(torrent)
-                elif not is_uploading:
-                    # 既不是下载中也不是做种中，且未完成，视为暂停的种子
+                elif not is_uploading and not is_paused:
+                    # 既不是下载中也不是做种中也不是暂停，且未完成，视为其他暂停状态
                     paused_torrents.append(torrent)
             
             # 输出状态统计用于调试
