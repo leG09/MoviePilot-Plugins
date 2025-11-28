@@ -2191,7 +2191,9 @@ class QbOptimizer(_PluginBase):
                 
                 # 收集暂停种子的信息
                 paused_torrent_info = []
-                for torrent in paused_torrents:
+                logger.info(f"【功能5-下载阈值控制】开始收集 {len(paused_torrents)} 个暂停种子的信息")
+                
+                for i, torrent in enumerate(paused_torrents, 1):
                     torrent_hash = getattr(torrent, 'hash', '')
                     torrent_name = getattr(torrent, 'name', 'Unknown')
                     
@@ -2199,6 +2201,7 @@ class QbOptimizer(_PluginBase):
                         # 获取种子文件列表
                         files = downloader_obj.get_files(tid=torrent_hash)
                         if not files:
+                            logger.debug(f"【功能5-下载阈值控制】暂停种子 {i}/{len(paused_torrents)}: {torrent_name} - 无法获取文件列表")
                             continue
                         
                         # 计算该种子需要下载的文件总大小
@@ -2227,41 +2230,54 @@ class QbOptimizer(_PluginBase):
                                 'dlspeed': dlspeed,
                                 'dlspeed_mbps': dlspeed / (1024 * 1024) if dlspeed > 0 else 0
                             })
+                            logger.debug(f"【功能5-下载阈值控制】暂停种子 {i}/{len(paused_torrents)}: {torrent_name} - 剩余: {StringUtils.str_filesize(torrent_remaining_size)}, 速度: {dlspeed / (1024 * 1024):.2f}MB/s")
+                        else:
+                            logger.debug(f"【功能5-下载阈值控制】暂停种子 {i}/{len(paused_torrents)}: {torrent_name} - 没有需要下载的文件（所有文件已完成或优先级为0）")
                     
                     except Exception as e:
                         logger.warning(f"【功能5-下载阈值控制】处理暂停种子异常: {torrent_name}, 错误: {str(e)}")
+                        import traceback
+                        logger.debug(f"【功能5-下载阈值控制】异常详情: {traceback.format_exc()}")
                         continue
                 
+                logger.info(f"【功能5-下载阈值控制】收集完成: 共 {len(paused_torrent_info)} 个暂停种子有需要下载的文件")
+                
                 if not paused_torrent_info:
-                    logger.info(f"【功能5-下载阈值控制】没有需要恢复的暂停种子")
+                    logger.info(f"【功能5-下载阈值控制】没有需要恢复的暂停种子（所有暂停种子的文件都已完成或优先级为0）")
                     return False
                 
                 # 按下载速度从快到慢排序（快的先恢复）
                 paused_torrent_info.sort(key=lambda x: x['dlspeed_mbps'], reverse=True)
                 
+                # 输出前5个待恢复的种子信息
+                logger.info(f"【功能5-下载阈值控制】待恢复种子列表（前5个，按速度排序）:")
+                for i, t in enumerate(paused_torrent_info[:5], 1):
+                    logger.info(f"  {i}. {t['torrent_name']} | 速度: {t['dlspeed_mbps']:.2f}MB/s | 剩余: {StringUtils.str_filesize(t['remaining_size'])}")
+                
                 # 计算当前可用的额外空间
                 available_space_gb = estimated_free_space - self._min_disk_space_threshold
                 available_space_bytes = available_space_gb * (1024**3)
                 
-                logger.info(f"【功能5-下载阈值控制】可用额外空间: {available_space_gb:.2f}GB，可以恢复部分暂停的种子")
+                logger.info(f"【功能5-下载阈值控制】可用额外空间: {available_space_gb:.2f}GB ({StringUtils.str_filesize(available_space_bytes)})，可以恢复部分暂停的种子")
                 
                 resumed_count = 0
                 resumed_size = 0
                 
                 # 从快到慢恢复种子，但不能超过阈值
-                for torrent_info in paused_torrent_info:
+                for i, torrent_info in enumerate(paused_torrent_info, 1):
                     remaining_size = torrent_info['remaining_size']
+                    torrent_name = torrent_info['torrent_name']
                     
                     # 如果恢复这个种子会超过阈值，停止恢复
                     if resumed_size + remaining_size > available_space_bytes:
-                        logger.debug(f"【功能5-下载阈值控制】恢复此种子会超过阈值，停止恢复: {torrent_info['torrent_name']}")
+                        logger.info(f"【功能5-下载阈值控制】恢复种子 {i}/{len(paused_torrent_info)}: {torrent_name} - 恢复此种子会超过阈值（已恢复: {StringUtils.str_filesize(resumed_size)}, 此种子: {StringUtils.str_filesize(remaining_size)}, 可用: {StringUtils.str_filesize(available_space_bytes)}），停止恢复")
                         break
                     
                     torrent_hash = torrent_info['torrent_hash']
-                    torrent_name = torrent_info['torrent_name']
                     dlspeed_mbps = torrent_info['dlspeed_mbps']
                     
                     try:
+                        logger.info(f"【功能5-下载阈值控制】恢复种子 {i}/{len(paused_torrent_info)}: {torrent_name} - 尝试恢复（速度: {dlspeed_mbps:.2f}MB/s, 剩余: {StringUtils.str_filesize(remaining_size)}）")
                         # 恢复种子
                         result = downloader_obj.start_torrents(ids=[torrent_hash])
                         
@@ -2270,10 +2286,12 @@ class QbOptimizer(_PluginBase):
                             resumed_count += 1
                             resumed_size += remaining_size
                         else:
-                            logger.warning(f"【功能5-下载阈值控制】恢复种子失败: {torrent_name}")
+                            logger.warning(f"【功能5-下载阈值控制】恢复种子失败: {torrent_name} (API返回False)")
                             
                     except Exception as e:
                         logger.error(f"【功能5-下载阈值控制】恢复种子异常: {torrent_name}, 错误: {str(e)}")
+                        import traceback
+                        logger.debug(f"【功能5-下载阈值控制】异常详情: {traceback.format_exc()}")
                 
                 logger.info(f"【功能5-下载阈值控制】恢复完成: 恢复 {resumed_count} 个种子，占用空间: {StringUtils.str_filesize(resumed_size)}")
                 
