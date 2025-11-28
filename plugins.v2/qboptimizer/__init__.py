@@ -2246,13 +2246,14 @@ class QbOptimizer(_PluginBase):
                     logger.info(f"【功能5-下载阈值控制】没有需要恢复的暂停种子（所有暂停种子的文件都已完成或优先级为0）")
                     return False
                 
-                # 按下载速度从快到慢排序（快的先恢复）
-                paused_torrent_info.sort(key=lambda x: x['dlspeed_mbps'], reverse=True)
+                # 按文件大小从小到大排序（小的先恢复），这样可以恢复更多种子
+                # 因为暂停的种子速度都是0，按速度排序没有意义
+                paused_torrent_info.sort(key=lambda x: x['remaining_size'])
                 
                 # 输出前5个待恢复的种子信息
-                logger.info(f"【功能5-下载阈值控制】待恢复种子列表（前5个，按速度排序）:")
+                logger.info(f"【功能5-下载阈值控制】待恢复种子列表（前5个，按大小从小到大排序）:")
                 for i, t in enumerate(paused_torrent_info[:5], 1):
-                    logger.info(f"  {i}. {t['torrent_name']} | 速度: {t['dlspeed_mbps']:.2f}MB/s | 剩余: {StringUtils.str_filesize(t['remaining_size'])}")
+                    logger.info(f"  {i}. {t['torrent_name']} | 剩余: {StringUtils.str_filesize(t['remaining_size'])} | 速度: {t['dlspeed_mbps']:.2f}MB/s")
                 
                 # 计算当前可用的额外空间
                 available_space_gb = estimated_free_space - self._min_disk_space_threshold
@@ -2263,7 +2264,7 @@ class QbOptimizer(_PluginBase):
                 resumed_count = 0
                 resumed_size = 0
                 
-                # 从快到慢恢复种子，但不能超过阈值
+                # 从小到大恢复种子（小的先恢复，可以恢复更多种子），但不能超过阈值
                 for i, torrent_info in enumerate(paused_torrent_info, 1):
                     remaining_size = torrent_info['remaining_size']
                     torrent_name = torrent_info['torrent_name']
@@ -2302,7 +2303,7 @@ class QbOptimizer(_PluginBase):
                     notification_text += f"预计剩余空间: {estimated_free_space:.2f}GB\n"
                     notification_text += f"最小阈值: {self._min_disk_space_threshold}GB\n"
                     notification_text += f"可用额外空间: {available_space_gb:.2f}GB\n"
-                    notification_text += f"\n已恢复 {resumed_count} 个下载速度快的种子，占用空间: {StringUtils.str_filesize(resumed_size)}\n"
+                    notification_text += f"\n已恢复 {resumed_count} 个暂停的种子（按大小从小到大），占用空间: {StringUtils.str_filesize(resumed_size)}\n"
                     notification_text += f"确保磁盘空间不会超过阈值"
                     
                     self.post_message(
