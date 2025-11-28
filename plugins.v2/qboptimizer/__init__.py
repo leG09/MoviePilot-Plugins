@@ -2255,23 +2255,25 @@ class QbOptimizer(_PluginBase):
                 for i, t in enumerate(paused_torrent_info[:5], 1):
                     logger.info(f"  {i}. {t['torrent_name']} | 剩余: {StringUtils.str_filesize(t['remaining_size'])} | 速度: {t['dlspeed_mbps']:.2f}MB/s")
                 
-                # 计算当前可用的额外空间
-                available_space_gb = estimated_free_space - self._min_disk_space_threshold
-                available_space_bytes = available_space_gb * (1024**3)
-                
-                logger.info(f"【功能5-下载阈值控制】可用额外空间: {available_space_gb:.2f}GB ({StringUtils.str_filesize(available_space_bytes)})，可以恢复部分暂停的种子")
+                # 计算当前预计剩余空间（用于判断恢复后是否超过阈值）
+                logger.info(f"【功能5-下载阈值控制】当前预计剩余空间: {estimated_free_space:.2f}GB, 最小阈值: {self._min_disk_space_threshold}GB")
+                logger.info(f"【功能5-下载阈值控制】可以恢复的种子：恢复后预计剩余空间 >= {self._min_disk_space_threshold}GB")
                 
                 resumed_count = 0
                 resumed_size = 0
+                current_estimated_free_space = estimated_free_space  # 动态跟踪恢复后的预计剩余空间
                 
                 # 从小到大恢复种子（小的先恢复，可以恢复更多种子），但不能超过阈值
                 for i, torrent_info in enumerate(paused_torrent_info, 1):
                     remaining_size = torrent_info['remaining_size']
                     torrent_name = torrent_info['torrent_name']
                     
-                    # 如果恢复这个种子会超过阈值，停止恢复
-                    if resumed_size + remaining_size > available_space_bytes:
-                        logger.info(f"【功能5-下载阈值控制】恢复种子 {i}/{len(paused_torrent_info)}: {torrent_name} - 恢复此种子会超过阈值（已恢复: {StringUtils.str_filesize(resumed_size)}, 此种子: {StringUtils.str_filesize(remaining_size)}, 可用: {StringUtils.str_filesize(available_space_bytes)}），停止恢复")
+                    # 计算恢复这个种子后的预计剩余空间
+                    new_estimated_free_space = current_estimated_free_space - (remaining_size / (1024**3))  # 转换为GB
+                    
+                    # 如果恢复这个种子后，预计剩余空间 < 最小阈值，停止恢复
+                    if new_estimated_free_space < self._min_disk_space_threshold:
+                        logger.info(f"【功能5-下载阈值控制】恢复种子 {i}/{len(paused_torrent_info)}: {torrent_name} - 恢复此种子后预计剩余空间({new_estimated_free_space:.2f}GB) < 最小阈值({self._min_disk_space_threshold}GB)，停止恢复")
                         break
                     
                     torrent_hash = torrent_info['torrent_hash']
@@ -2286,6 +2288,9 @@ class QbOptimizer(_PluginBase):
                             logger.info(f"【功能5-下载阈值控制】恢复种子成功: {torrent_name} (速度: {dlspeed_mbps:.2f}MB/s, 剩余: {StringUtils.str_filesize(remaining_size)})")
                             resumed_count += 1
                             resumed_size += remaining_size
+                            # 更新当前预计剩余空间（恢复后，这个种子会变成下载中的）
+                            current_estimated_free_space = new_estimated_free_space
+                            logger.debug(f"【功能5-下载阈值控制】恢复后预计剩余空间更新为: {current_estimated_free_space:.2f}GB")
                         else:
                             logger.warning(f"【功能5-下载阈值控制】恢复种子失败: {torrent_name} (API返回False)")
                             
@@ -2300,9 +2305,9 @@ class QbOptimizer(_PluginBase):
                 if self._notify and resumed_count > 0:
                     notification_title = "【QB种子优化】下载阈值控制已恢复种子"
                     notification_text = f"当前磁盘剩余空间: {free_space_gb:.2f}GB\n"
-                    notification_text += f"预计剩余空间: {estimated_free_space:.2f}GB\n"
+                    notification_text += f"恢复前预计剩余空间: {estimated_free_space:.2f}GB\n"
+                    notification_text += f"恢复后预计剩余空间: {current_estimated_free_space:.2f}GB\n"
                     notification_text += f"最小阈值: {self._min_disk_space_threshold}GB\n"
-                    notification_text += f"可用额外空间: {available_space_gb:.2f}GB\n"
                     notification_text += f"\n已恢复 {resumed_count} 个暂停的种子（按大小从小到大），占用空间: {StringUtils.str_filesize(resumed_size)}\n"
                     notification_text += f"确保磁盘空间不会超过阈值"
                     
