@@ -1984,25 +1984,67 @@ class QbOptimizer(_PluginBase):
             downloading_torrents = []  # 正在下载的种子
             paused_torrents = []      # 暂停的种子（可能是我们暂停的）
             
+            # 用于调试：统计所有状态
+            state_counter = {}
+            
             for torrent in torrents:
-                state_name = getattr(torrent, 'state', '') or ''
-                state_lower = state_name.lower()
-                
-                # 下载中的种子
-                is_downloading = 'downloading' in state_lower or 'stalleddl' in state_lower or 'metadl' in state_lower
-                # 暂停的种子（可能是我们暂停的，也可能是用户手动暂停的）
-                is_paused = 'paused' in state_lower or 'pauseddl' in state_lower
-                
                 progress = getattr(torrent, 'progress', 0)
                 if progress >= 1.0:
                     continue  # 跳过已完成的种子
                 
+                state_name = getattr(torrent, 'state', '') or ''
+                state_lower = state_name.lower()
+                
+                # 统计状态用于调试
+                state_counter[state_name] = state_counter.get(state_name, 0) + 1
+                
+                # 检测下载中的种子：优先使用 state_enum（更可靠）
+                is_downloading = False
+                try:
+                    if hasattr(torrent, 'state_enum'):
+                        is_downloading = torrent.state_enum.is_downloading
+                except Exception:
+                    pass
+                
+                # 如果 state_enum 不可用，使用字符串匹配
+                if not is_downloading:
+                    is_downloading = ('downloading' in state_lower or 
+                                    'stalleddl' in state_lower or 
+                                    'metadl' in state_lower or
+                                    'queueddl' in state_lower)
+                
+                # 检测做种中的种子
+                is_uploading = False
+                try:
+                    if hasattr(torrent, 'state_enum'):
+                        is_uploading = torrent.state_enum.is_uploading
+                except Exception:
+                    pass
+                
+                if not is_uploading:
+                    is_uploading = ('uploading' in state_lower or 
+                                  'stalledup' in state_lower or 
+                                  'queuedup' in state_lower)
+                
+                # 分类种子
                 if is_downloading:
                     downloading_torrents.append(torrent)
-                elif is_paused:
+                elif not is_uploading:
+                    # 既不是下载中也不是做种中，且未完成，视为暂停的种子
                     paused_torrents.append(torrent)
             
+            # 输出状态统计用于调试
+            logger.info(f"【功能5-下载阈值控制】种子状态统计: {dict(sorted(state_counter.items(), key=lambda x: x[1], reverse=True)[:10])}")
             logger.info(f"【功能5-下载阈值控制】发现 {len(downloading_torrents)} 个下载中的种子, {len(paused_torrents)} 个暂停的种子")
+            
+            # 如果检测到暂停的种子，输出前几个的详细信息用于调试
+            if paused_torrents:
+                logger.debug(f"【功能5-下载阈值控制】暂停种子详情（前5个）:")
+                for i, torrent in enumerate(paused_torrents[:5], 1):
+                    state_name = getattr(torrent, 'state', '') or ''
+                    progress = getattr(torrent, 'progress', 0)
+                    dlspeed = getattr(torrent, 'dlspeed', 0)
+                    logger.debug(f"  {i}. {getattr(torrent, 'name', 'Unknown')} | 状态: {state_name} | 进度: {progress*100:.1f}% | 速度: {dlspeed}")
             
             # 收集所有下载中种子的文件信息（只计算需要下载的文件，优先级不为0）
             downloading_torrent_info = []
