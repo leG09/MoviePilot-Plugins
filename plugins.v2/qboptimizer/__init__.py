@@ -2107,21 +2107,39 @@ class QbOptimizer(_PluginBase):
                     logger.warning(f"【功能5-下载阈值控制】处理种子文件异常: {torrent_name}, 错误: {str(e)}")
                     continue
             
-            if not downloading_torrent_info:
-                logger.info(f"【功能5-下载阈值控制】没有需要下载的文件（所有文件优先级为0或已完成），无需调整")
-                return False
-            
             # 计算所有下载中种子的总剩余大小
-            total_remaining_size = sum(t['remaining_size'] for t in downloading_torrent_info)
-            total_remaining_gb = total_remaining_size / (1024**3)
-            estimated_free_space = free_space_gb - total_remaining_gb
-            
-            logger.info(f"【功能5-下载阈值控制】下载中种子总数: {len(downloading_torrent_info)}")
-            logger.info(f"【功能5-下载阈值控制】预计下载空间（仅计算需要下载的文件）: {total_remaining_gb:.2f}GB")
-            logger.info(f"【功能5-下载阈值控制】预计剩余空间: {estimated_free_space:.2f}GB")
+            if downloading_torrent_info:
+                total_remaining_size = sum(t['remaining_size'] for t in downloading_torrent_info)
+                total_remaining_gb = total_remaining_size / (1024**3)
+                estimated_free_space = free_space_gb - total_remaining_gb
+                
+                logger.info(f"【功能5-下载阈值控制】下载中种子总数: {len(downloading_torrent_info)}")
+                logger.info(f"【功能5-下载阈值控制】预计下载空间（仅计算需要下载的文件）: {total_remaining_gb:.2f}GB")
+                logger.info(f"【功能5-下载阈值控制】预计剩余空间: {estimated_free_space:.2f}GB")
+            else:
+                # 没有下载中的种子，预计剩余空间就是当前剩余空间
+                total_remaining_gb = 0
+                estimated_free_space = free_space_gb
+                
+                logger.info(f"【功能5-下载阈值控制】没有下载中的种子")
+                logger.info(f"【功能5-下载阈值控制】预计下载空间: 0GB")
+                logger.info(f"【功能5-下载阈值控制】预计剩余空间（当前剩余空间）: {estimated_free_space:.2f}GB")
+                
+                # 如果没有暂停的种子，直接返回
+                if not paused_torrents:
+                    logger.info(f"【功能5-下载阈值控制】没有暂停的种子，无需调整")
+                    return False
+                
+                # 如果有暂停的种子，继续执行恢复逻辑（跳过暂停逻辑，直接到恢复逻辑）
+                logger.info(f"【功能5-下载阈值控制】有暂停的种子，检查是否可以恢复")
             
             # 如果预计剩余空间小于最小阈值，需要暂停部分种子
             if estimated_free_space < self._min_disk_space_threshold:
+                # 如果没有下载中的种子，无法暂停，直接返回
+                if not downloading_torrent_info:
+                    logger.warning(f"【功能5-下载阈值控制】预计剩余空间({estimated_free_space:.2f}GB) < 最小阈值({self._min_disk_space_threshold}GB)，但没有下载中的种子可以暂停")
+                    return False
+                
                 logger.warning(f"【功能5-下载阈值控制】预计剩余空间({estimated_free_space:.2f}GB) < 最小阈值({self._min_disk_space_threshold}GB)，开始暂停种子")
                 
                 # 按下载速度从慢到快排序（慢的先暂停）
