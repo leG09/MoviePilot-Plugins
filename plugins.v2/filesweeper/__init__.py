@@ -760,6 +760,45 @@ class FileSweeper(_PluginBase):
                                 logger.debug(f"文件大小: {file_size}")
                                 
                                 if not self._dry_run:
+                                    # 先检查文件是否存在
+                                    file_exists = False
+                                    if src_fileitem.storage == "local":
+                                        src_path = Path(src_fileitem.path)
+                                        if src_fileitem.type == "file":
+                                            file_exists = src_path.exists() and src_path.is_file()
+                                        else:
+                                            file_exists = src_path.exists() and src_path.is_dir()
+                                    else:
+                                        # 对于远程文件，假设文件存在，让后续操作处理
+                                        # 如果文件不存在，后续操作会抛出异常，我们可以在那里捕获并删除记录
+                                        file_exists = True
+                                        logger.debug(f"远程文件，假设存在，由后续操作验证: {src_fileitem.path}")
+                                    
+                                    if not file_exists:
+                                        # 文件不存在，直接删除转移记录
+                                        logger.info(f"源文件不存在，直接删除转移记录: {src_fileitem.path}")
+                                        
+                                        # 在删除记录前保存需要的信息
+                                        transfer_id = transfer.id
+                                        transfer_title = transfer.title
+                                        transfer_date = transfer.date
+                                        transfer_src = transfer.src
+                                        transfer_hash = transfer.download_hash
+                                        
+                                        # 删除转移记录
+                                        TransferHistory.delete(db, transfer_id)
+                                        logger.info(f"已删除转移记录（文件不存在）: ID={transfer_id}, 标题={transfer_title}, 路径={src_fileitem.path}")
+                                
+                                        cleaned_files.append({
+                                                    "path": src_fileitem.path,
+                                                    "size": 0,
+                                                    "modified": transfer_date,
+                                                    "title": transfer_title,
+                                                    "type": "failed_transfer",
+                                                    "reason": "文件不存在，已删除记录"
+                                                })
+                                        continue
+                                    
                                     # 智能模式：根据失败原因决定删除或转移
                                     should_delete = False
                                     should_transfer = False
@@ -858,10 +897,34 @@ class FileSweeper(_PluginBase):
                                             })
                                             total_size += file_size
                                         else:
-                                            logger.error(f"转移文件失败: {src_fileitem.path}")
-                                            logger.error(f"转移失败详情: {error_msg}")
-                                            logger.error(f"转移记录信息 - ID: {transfer.id}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
-                                            errors.append(error_msg)
+                                            # 检查错误信息是否表明文件不存在
+                                            if "不存在" in error_msg or "not exist" in error_msg.lower() or "源文件不存在" in error_msg or "源文件夹不存在" in error_msg:
+                                                logger.info(f"转移失败，文件不存在，直接删除转移记录: {src_fileitem.path}")
+                                                
+                                                # 在删除记录前保存需要的信息
+                                                transfer_id = transfer.id
+                                                transfer_title = transfer.title
+                                                transfer_date = transfer.date
+                                                transfer_src = transfer.src
+                                                transfer_hash = transfer.download_hash
+                                                
+                                                # 删除转移记录
+                                                TransferHistory.delete(db, transfer_id)
+                                                logger.info(f"已删除转移记录（文件不存在）: ID={transfer_id}, 标题={transfer_title}, 路径={src_fileitem.path}")
+                                                
+                                                cleaned_files.append({
+                                                    "path": src_fileitem.path,
+                                                    "size": 0,
+                                                    "modified": transfer_date,
+                                                    "title": transfer_title,
+                                                    "type": "failed_transfer",
+                                                    "reason": "文件不存在，已删除记录"
+                                                })
+                                            else:
+                                                logger.error(f"转移文件失败: {src_fileitem.path}")
+                                                logger.error(f"转移失败详情: {error_msg}")
+                                                logger.error(f"转移记录信息 - ID: {transfer.id}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
+                                                errors.append(error_msg)
                                     elif should_delete:
                                         # 删除模式
                                         storage_chain = StorageChain()
@@ -907,8 +970,32 @@ class FileSweeper(_PluginBase):
                                             total_size += file_size
                                         else:
                                             error_msg = f"删除转移失败文件失败: {src_fileitem.path}"
-                                            logger.error(error_msg)
-                                            errors.append(error_msg)
+                                            # 检查错误信息是否表明文件不存在
+                                            if "不存在" in error_msg or "not exist" in error_msg.lower() or "源文件不存在" in error_msg or "源文件夹不存在" in error_msg:
+                                                logger.info(f"删除失败，文件不存在，直接删除转移记录: {src_fileitem.path}")
+                                                
+                                                # 在删除记录前保存需要的信息
+                                                transfer_id = transfer.id
+                                                transfer_title = transfer.title
+                                                transfer_date = transfer.date
+                                                transfer_src = transfer.src
+                                                transfer_hash = transfer.download_hash
+                                                
+                                                # 删除转移记录
+                                                TransferHistory.delete(db, transfer_id)
+                                                logger.info(f"已删除转移记录（文件不存在）: ID={transfer_id}, 标题={transfer_title}, 路径={src_fileitem.path}")
+                                                
+                                                cleaned_files.append({
+                                                    "path": src_fileitem.path,
+                                                    "size": 0,
+                                                    "modified": transfer_date,
+                                                    "title": transfer_title,
+                                                    "type": "failed_transfer",
+                                                    "reason": "文件不存在，已删除记录"
+                                                })
+                                            else:
+                                                logger.error(error_msg)
+                                                errors.append(error_msg)
                                 else:
                                     # 预览模式
                                     # 生成文件夹名称（使用原始文件夹名称）
