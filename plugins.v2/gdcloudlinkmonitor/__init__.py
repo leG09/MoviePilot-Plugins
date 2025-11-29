@@ -1246,15 +1246,15 @@ class GDCloudLinkMonitor(_PluginBase):
                 transfer_history = self.transferhis.get_by_src(event_path)
                 if transfer_history:
                     logger.info("文件已处理过：%s" % event_path)
-                    # 如果AI识别功能未开启，直接删除转移记录
+                    # 如果AI识别功能未开启，且转移记录为成功状态，则直接删除该成功记录
                     if not self._ai_rename_enabled:
-                        logger.info("AI规范命名未启用，删除转移记录：%s" % event_path)
-                        if transfer_history and transfer_history.id:
+                        logger.info("AI规范命名未启用，检查是否删除成功的转移记录：%s" % event_path)
+                        if getattr(transfer_history, "status", False) and transfer_history.id:
                             try:
                                 self.transferhis.delete(transfer_history.id)
-                                logger.info(f"已删除转移记录（ID: {transfer_history.id}），文件：{event_path}")
+                                logger.info(f"已删除成功转移记录（ID: {transfer_history.id}），文件：{event_path}")
                             except Exception as e:
-                                logger.error(f"删除转移记录失败：{e}")
+                                logger.error(f"删除成功转移记录失败：{e}")
                         return
                     # 触发AI规范命名 - 修复bug：只对媒体文件夹进行重命名，不对监控根目录重命名
                     try:
@@ -1288,13 +1288,13 @@ class GDCloudLinkMonitor(_PluginBase):
                         
                         if dir_key in self._ai_normalized_dirs:
                             logger.info(f"目录已记录为已规范命名，跳过AI：{dir_key}")
-                            # 如果文件已处理过且AI规范命名也触发过，则删除转移记录
-                            if transfer_history and transfer_history.id:
+                            # 如果文件已处理过且AI规范命名也触发过，则仅删除成功的转移记录
+                            if getattr(transfer_history, "status", False) and transfer_history.id:
                                 try:
                                     self.transferhis.delete(transfer_history.id)
-                                    logger.info(f"已删除转移记录（ID: {transfer_history.id}），文件：{event_path}，目录：{dir_key}")
+                                    logger.info(f"已删除成功转移记录（ID: {transfer_history.id}），文件：{event_path}，目录：{dir_key}")
                                 except Exception as e:
-                                    logger.error(f"删除转移记录失败：{e}")
+                                    logger.error(f"删除成功转移记录失败：{e}")
                         elif dir_key in self._ai_processed_dirs:
                             logger.info(f"目录本次运行已触发过AI，跳过重复调用：{dir_key}")
                         else:
