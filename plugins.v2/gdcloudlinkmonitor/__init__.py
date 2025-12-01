@@ -1245,76 +1245,74 @@ class GDCloudLinkMonitor(_PluginBase):
             with lock:
                 transfer_history = self.transferhis.get_by_src(event_path)
                 if transfer_history:
-                    logger.info("文件已处理过：%s" % event_path)
-                    # 如果AI识别功能未开启，且转移记录为成功状态，则直接删除该成功记录
-                    if not self._ai_rename_enabled:
-                        logger.info("AI规范命名未启用，检查是否删除成功的转移记录：%s" % event_path)
-                        if getattr(transfer_history, "status", False) and transfer_history.id:
+                    # 如果转移记录是成功的，删除记录后继续处理文件（允许重新转移）
+                    # 如果转移记录是失败的，保留记录但继续处理文件（允许重新尝试转移）
+                    transfer_status = getattr(transfer_history, "status", False)
+                    if transfer_status:
+                        logger.info(f"文件已成功转移过，删除成功转移记录后继续处理：{event_path}")
+                        if transfer_history.id:
                             try:
                                 self.transferhis.delete(transfer_history.id)
                                 logger.info(f"已删除成功转移记录（ID: {transfer_history.id}），文件：{event_path}")
                             except Exception as e:
                                 logger.error(f"删除成功转移记录失败：{e}")
-                        return
-                    # 触发AI规范命名 - 修复bug：只对媒体文件夹进行重命名，不对监控根目录重命名
-                    try:
-                        ep_path = Path(event_path)
-                        dir_path = ep_path.parent
-                        dir_key = str(dir_path)
-                        
-                        # 安全检查：防止重命名监控根目录
-                        if str(dir_path) == mon_path:
-                            logger.warning(f"AI重命名跳过：不能重命名监控根目录 {dir_path}")
-                            return
-                        
-                        # 检查是否为媒体文件夹（包含媒体文件的直接父目录）
-                        is_media_folder = False
+                    else:
+                        logger.info(f"文件转移失败过，保留失败记录并继续处理：{event_path}")
+                    
+                    # 如果AI识别功能未开启，删除记录后继续处理
+                    if not self._ai_rename_enabled:
+                        # 继续处理文件，不return
+                        pass
+                    else:
+                        # 触发AI规范命名 - 修复bug：只对媒体文件夹进行重命名，不对监控根目录重命名
                         try:
-                            # 检查目录是否包含媒体文件
-                            media_files = SystemUtils.list_files(dir_path, settings.RMT_MEDIAEXT)
-                            if media_files:
-                                # 检查是否所有媒体文件都在这个目录的直接子级
-                                for media_file in media_files:
-                                    if Path(media_file).parent != dir_path:
-                                        break
-                                else:
-                                    is_media_folder = True
-                        except Exception as e:
-                            logger.debug(f"检查媒体文件夹时出错: {e}")
-                        
-                        if not is_media_folder:
-                            logger.debug(f"AI重命名跳过：{dir_path} 不是媒体文件夹")
-                            return
-                        
-                        if dir_key in self._ai_normalized_dirs:
-                            logger.info(f"目录已记录为已规范命名，跳过AI：{dir_key}")
-                            # 如果文件已处理过且AI规范命名也触发过，则仅删除成功的转移记录
-                            if getattr(transfer_history, "status", False) and transfer_history.id:
+                            ep_path = Path(event_path)
+                            dir_path = ep_path.parent
+                            dir_key = str(dir_path)
+                            
+                            # 安全检查：防止重命名监控根目录
+                            if str(dir_path) == mon_path:
+                                logger.warning(f"AI重命名跳过：不能重命名监控根目录 {dir_path}")
+                                # 继续处理文件，不return
+                            else:
+                                # 检查是否为媒体文件夹（包含媒体文件的直接父目录）
+                                is_media_folder = False
                                 try:
-                                    self.transferhis.delete(transfer_history.id)
-                                    logger.info(f"已删除成功转移记录（ID: {transfer_history.id}），文件：{event_path}，目录：{dir_key}")
+                                    # 检查目录是否包含媒体文件
+                                    media_files = SystemUtils.list_files(dir_path, settings.RMT_MEDIAEXT)
+                                    if media_files:
+                                        # 检查是否所有媒体文件都在这个目录的直接子级
+                                        for media_file in media_files:
+                                            if Path(media_file).parent != dir_path:
+                                                break
+                                        else:
+                                            is_media_folder = True
                                 except Exception as e:
-                                    logger.error(f"删除成功转移记录失败：{e}")
-                        elif dir_key in self._ai_processed_dirs:
-                            logger.info(f"目录本次运行已触发过AI，跳过重复调用：{dir_key}")
-                        else:
-                            logger.info(f"准备触发AI规范命名，媒体文件夹：{dir_key}")
-                            ai_suggestion = self._call_ai_normalize_naming(str(dir_path))
-                            if ai_suggestion:
-                                # 执行文件夹重命名
-                                rename_ok = self._apply_ai_folder_renaming(directory_path=dir_path, suggestion=ai_suggestion)
-                                if rename_ok:
-                                    # 标记目录已处理，避免重复请求
-                                    self._ai_processed_dirs.add(dir_key)
-                                    # 记录规范化已完成
-                                    self._ai_normalized_dirs.add(dir_key)
-                                    self._save_ai_normalized_state()
-                                    logger.info(f"AI文件夹重命名成功：{dir_path}")
-                                else:
-                                    logger.warning(f"AI文件夹重命名失败：{dir_path}")
-                    except Exception as e:
-                        logger.debug(f"AI重命名触发异常: {e}")
-                    return
+                                    logger.debug(f"检查媒体文件夹时出错: {e}")
+                                
+                                if is_media_folder:
+                                    if dir_key in self._ai_normalized_dirs:
+                                        logger.info(f"目录已记录为已规范命名，跳过AI：{dir_key}")
+                                    elif dir_key in self._ai_processed_dirs:
+                                        logger.info(f"目录本次运行已触发过AI，跳过重复调用：{dir_key}")
+                                    else:
+                                        logger.info(f"准备触发AI规范命名，媒体文件夹：{dir_key}")
+                                        ai_suggestion = self._call_ai_normalize_naming(str(dir_path))
+                                        if ai_suggestion:
+                                            # 执行文件夹重命名
+                                            rename_ok = self._apply_ai_folder_renaming(directory_path=dir_path, suggestion=ai_suggestion)
+                                            if rename_ok:
+                                                # 标记目录已处理，避免重复请求
+                                                self._ai_processed_dirs.add(dir_key)
+                                                # 记录规范化已完成
+                                                self._ai_normalized_dirs.add(dir_key)
+                                                self._save_ai_normalized_state()
+                                                logger.info(f"AI文件夹重命名成功：{dir_path}")
+                                            else:
+                                                logger.warning(f"AI文件夹重命名失败：{dir_path}")
+                        except Exception as e:
+                            logger.debug(f"AI重命名触发异常: {e}")
+                    # 删除记录后继续处理文件，不return
 
                 # 回收站及隐藏的文件不处理
                 if event_path.find('/@Recycle/') != -1 \
