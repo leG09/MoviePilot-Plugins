@@ -1339,9 +1339,9 @@ class GDCloudLinkMonitor(_PluginBase):
                             logger.info(f"{event_path} 命中整理屏蔽词 {keyword}，不处理")
                             return
 
-                # 不是媒体文件不处理
-                if file_path.suffix not in settings.RMT_MEDIAEXT:
-                    logger.debug(f"{event_path} 不是媒体文件")
+                # 不是媒体文件不处理（转换为小写进行比较，支持.TS等大写后缀）
+                if file_path.suffix.lower() not in settings.RMT_MEDIAEXT:
+                    logger.debug(f"{event_path} 不是媒体文件（后缀：{file_path.suffix}）")
                     return
 
                 # 判断是不是蓝光目录
