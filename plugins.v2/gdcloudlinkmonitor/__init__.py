@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.0" 
+    plugin_version = "3.1.1" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -986,18 +986,18 @@ class GDCloudLinkMonitor(_PluginBase):
             self._transfer_type = config.get("transfer_type")
             self._monitor_dirs = config.get("monitor_dirs") or ""
             self._exclude_keywords = config.get("exclude_keywords") or ""
-            self._interval = config.get("interval") or 10
+            self._interval = int(config.get("interval") or 10)
             self._cron = config.get("cron")
-            self._size = config.get("size") or 0
+            self._size = int(config.get("size") or 0)
             self._softlink = config.get("softlink")
             self._strm = config.get("strm")
             
             # 日志监控相关配置
             self._log_monitor_enabled = config.get("log_monitor_enabled", False)
             self._log_path = config.get("log_path", "")
-            self._log_check_interval = config.get("log_check_interval", 60)
-            self._error_threshold = config.get("error_threshold", 3)
-            self._recovery_check_interval = config.get("recovery_check_interval", 1800)
+            self._log_check_interval = int(config.get("log_check_interval", 60))
+            self._error_threshold = int(config.get("error_threshold", 3))
+            self._recovery_check_interval = int(config.get("recovery_check_interval", 1800))
             self._mount_path_mapping = config.get("mount_path_mapping", "")
             
             # 目录刷新相关配置
@@ -1020,8 +1020,8 @@ class GDCloudLinkMonitor(_PluginBase):
                 # 未提供字段：沿用持久化文件中的密钥
                 self._ai_api_keys, saved_index = self._load_ai_keys_state()
                 self._ai_key_index = saved_index if self._ai_api_keys else -1
-            self._ai_timeout = config.get("ai_timeout", 30)
-            self._ai_cache_days = config.get("ai_cache_days", 5)
+            self._ai_timeout = int(config.get("ai_timeout", 30))
+            self._ai_cache_days = int(config.get("ai_cache_days", 5))
 
         # 停止现有任务
         self.stop_service()
