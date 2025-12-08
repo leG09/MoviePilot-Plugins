@@ -34,7 +34,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除或转移MoviePilot转移失败的文件，支持智能模式根据失败原因自动决定删除或转移"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.6"
+    plugin_version = "2.7"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -804,14 +804,20 @@ class FileSweeper(_PluginBase):
                                     should_transfer = False
                                     
                                     if self._smart_mode:
-                                        # 检查失败原因
+                                        # 智能模式：检查失败原因
                                         errmsg = transfer.errmsg or ""
                                         if "存在同名文件" in errmsg or "同名文件" in errmsg:
+                                            # 同名文件失败，强制删除
                                             should_delete = True
                                             logger.info(f"检测到同名文件失败原因，将删除: {src_fileitem.path}")
                                         else:
-                                            should_transfer = True
-                                            logger.info(f"其他失败原因，将转移: {src_fileitem.path}")
+                                            # 其他失败原因，遵循配置的处理模式
+                                            if self._transfer_mode == "transfer":
+                                                should_transfer = True
+                                                logger.info(f"其他失败原因，将转移: {src_fileitem.path}")
+                                            else:
+                                                should_delete = True
+                                                logger.info(f"其他失败原因，将删除: {src_fileitem.path}")
                                     else:
                                         # 非智能模式，使用配置的处理模式
                                         if self._transfer_mode == "transfer":
@@ -1019,7 +1025,11 @@ class FileSweeper(_PluginBase):
                                         if "存在同名文件" in errmsg or "同名文件" in errmsg:
                                             logger.info(f"[预览] 将删除转移失败文件（同名文件）: {src_fileitem.path}")
                                         else:
-                                            logger.info(f"[预览] 将转移转移失败文件: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}")
+                                            # 其他失败原因，遵循配置的处理模式
+                                            if self._transfer_mode == "transfer":
+                                                logger.info(f"[预览] 将转移转移失败文件: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}")
+                                            else:
+                                                logger.info(f"[预览] 将删除转移失败文件: {src_fileitem.path}")
                                     elif self._transfer_mode == "transfer":
                                         logger.info(f"[预览] 将转移转移失败文件: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}")
                                     else:
