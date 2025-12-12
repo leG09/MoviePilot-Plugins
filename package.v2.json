@@ -88,7 +88,7 @@
     "name": "文件清理",
     "description": "文件清理插件，支持定时删除指定目录超过N小时的文件夹和文件",
     "labels": "清理",
-    "version": "2.7",
+    "version": "2.8",
     "icon": "refresh2.png",
     "author": "leGO9",
     "level": 1,

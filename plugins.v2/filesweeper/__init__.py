@@ -1,9 +1,11 @@
 import os
 import time
 import shutil
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 try:
     from typing_extensions import Annotated
 except ImportError:
@@ -34,10 +36,15 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除或转移MoviePilot转移失败的文件，支持智能模式根据失败原因自动决定删除或转移"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.7"
+    plugin_version = "2.8"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
+    
+    # 超时配置（秒）
+    FILE_OPERATION_TIMEOUT = 300  # 文件操作超时：5分钟
+    DOWNLOAD_TIMEOUT = 600  # 下载超时：10分钟
+    DB_QUERY_TIMEOUT = 30  # 数据库查询超时：30秒
     
     def init_plugin(self, config: dict = None):
         """初始化插件"""
@@ -566,9 +573,22 @@ class FileSweeper(_PluginBase):
                 else:
                     # 非本地文件，使用 StorageChain 下载后转移
                     logger.info(f"处理非本地文件: {src_fileitem.path}, 存储类型: {src_fileitem.storage}")
-                    # 下载文件到本地临时位置
+                    # 下载文件到本地临时位置（添加超时保护）
                     logger.debug(f"开始下载文件: {src_fileitem.path}")
-                    local_file = storage_chain.download_file(src_fileitem)
+                    try:
+                        local_file = self._safe_file_operation(
+                            lambda: storage_chain.download_file(src_fileitem),
+                            f"下载文件: {src_fileitem.path}",
+                            timeout=self.DOWNLOAD_TIMEOUT
+                        )
+                    except TimeoutError as e:
+                        error_msg = f"下载文件超时: {src_fileitem.path}, {str(e)}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+                    except Exception as e:
+                        error_msg = f"下载文件失败: {src_fileitem.path}, {str(e)}"
+                        logger.error(error_msg)
+                        raise
                     if local_file and local_file.exists():
                         logger.debug(f"文件下载成功: {local_file}")
                         target_file = target_folder / Path(src_fileitem.path).name
@@ -583,9 +603,16 @@ class FileSweeper(_PluginBase):
                             shutil.move(str(local_file), str(target_file))
                             logger.info(f"转移文件成功: {src_fileitem.path} -> {target_file}")
                             transferred_count += 1
-                            # 删除源文件
+                            # 删除源文件（添加超时保护）
                             logger.debug(f"删除源文件: {src_fileitem.path}")
-                            storage_chain.delete_file(src_fileitem)
+                            try:
+                                self._safe_file_operation(
+                                    lambda: storage_chain.delete_file(src_fileitem),
+                                    f"删除源文件: {src_fileitem.path}",
+                                    timeout=self.FILE_OPERATION_TIMEOUT
+                                )
+                            except (TimeoutError, Exception) as e:
+                                logger.warning(f"删除源文件失败（继续执行）: {src_fileitem.path}, {str(e)}")
                         except Exception as e:
                             logger.error(f"转移文件失败: {local_file} -> {target_file}, 错误: {str(e)}")
                             raise
@@ -643,17 +670,41 @@ class FileSweeper(_PluginBase):
                     logger.warning(f"本地文件夹不存在: {src_path}, 存储类型: {src_fileitem.storage}")
                     raise Exception(f"源文件夹不存在: {src_path}")
                 else:
-                    # 非本地文件夹，使用 StorageChain 列出文件
+                    # 非本地文件夹，使用 StorageChain 列出文件（添加超时保护）
                     logger.info(f"处理非本地文件夹: {src_fileitem.path}, 存储类型: {src_fileitem.storage}")
                     logger.debug(f"开始列出文件夹中的文件: {src_fileitem.path}")
-                    files = storage_chain.list_files(src_fileitem, recursion=True)
+                    try:
+                        files = self._safe_file_operation(
+                            lambda: storage_chain.list_files(src_fileitem, recursion=True),
+                            f"列出文件夹: {src_fileitem.path}",
+                            timeout=self.FILE_OPERATION_TIMEOUT
+                        )
+                    except TimeoutError as e:
+                        error_msg = f"列出文件夹超时: {src_fileitem.path}, {str(e)}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+                    except Exception as e:
+                        error_msg = f"列出文件夹失败: {src_fileitem.path}, {str(e)}"
+                        logger.error(error_msg)
+                        raise
                     if files:
                         logger.debug(f"找到 {len(files)} 个文件/文件夹")
                         for file_item in files:
                             if file_item.type == "file":
                                 logger.debug(f"处理文件: {file_item.path}")
-                                # 下载文件到本地临时位置
-                                local_file = storage_chain.download_file(file_item)
+                                # 下载文件到本地临时位置（添加超时保护）
+                                try:
+                                    local_file = self._safe_file_operation(
+                                        lambda: storage_chain.download_file(file_item),
+                                        f"下载文件: {file_item.path}",
+                                        timeout=self.DOWNLOAD_TIMEOUT
+                                    )
+                                except TimeoutError as e:
+                                    logger.error(f"下载文件超时: {file_item.path}, {str(e)}")
+                                    continue  # 跳过这个文件，继续处理下一个
+                                except Exception as e:
+                                    logger.error(f"下载文件失败: {file_item.path}, {str(e)}")
+                                    continue  # 跳过这个文件，继续处理下一个
                                 if local_file and local_file.exists():
                                     # 只使用文件名，不保留文件夹结构
                                     target_file = target_folder / Path(file_item.path).name
@@ -668,9 +719,16 @@ class FileSweeper(_PluginBase):
                                         shutil.move(str(local_file), str(target_file))
                                         logger.info(f"转移文件成功: {file_item.path} -> {target_file}")
                                         transferred_count += 1
-                                        # 删除源文件
+                                        # 删除源文件（添加超时保护）
                                         logger.debug(f"删除源文件: {file_item.path}")
-                                        storage_chain.delete_file(file_item)
+                                        try:
+                                            self._safe_file_operation(
+                                                lambda: storage_chain.delete_file(file_item),
+                                                f"删除源文件: {file_item.path}",
+                                                timeout=self.FILE_OPERATION_TIMEOUT
+                                            )
+                                        except (TimeoutError, Exception) as e:
+                                            logger.warning(f"删除源文件失败（继续执行）: {file_item.path}, {str(e)}")
                                     except Exception as e:
                                         logger.error(f"转移文件失败: {local_file} -> {target_file}, 错误: {str(e)}")
                                         raise
@@ -711,34 +769,68 @@ class FileSweeper(_PluginBase):
             
             logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str} (N小时前: {self._failed_transfer_age_hours})")
             
-            # 创建数据库会话
+            # 使用上下文管理器确保数据库会话正确关闭
             db = SessionFactory()
             try:
-                # 先查询所有失败记录用于调试
-                all_failed = db.query(TransferHistory).filter(
-                    TransferHistory.status == False
-                ).all()
-                logger.info(f"数据库中总共有 {len(all_failed)} 条转移失败记录")
-                
-                # 打印所有失败记录的详细信息用于调试
-                if all_failed:
-                    logger.info("所有失败记录详情:")
-                    for idx, t in enumerate(all_failed[:10], 1):  # 只显示前10条
-                        logger.info(f"  记录 {idx}: ID={t.id}, 日期={t.date}, 标题={t.title}, 错误={t.errmsg[:50] if t.errmsg else 'None'}")
-                
-                # 查询转移失败的记录（使用datetime对象比较）
-                failed_transfers = db.query(TransferHistory).filter(
-                    and_(
-                        TransferHistory.status == False,  # 转移失败
-                        TransferHistory.date <= cutoff_time  # 超过指定时间（使用datetime对象）
+                # 先查询所有失败记录用于调试（添加超时保护）
+                try:
+                    all_failed = self._safe_file_operation(
+                        lambda: db.query(TransferHistory).filter(
+                            TransferHistory.status == False
+                        ).all(),
+                        "查询所有失败记录",
+                        timeout=self.DB_QUERY_TIMEOUT
                     )
-                ).all()
+                    logger.info(f"数据库中总共有 {len(all_failed)} 条转移失败记录")
+                    
+                    # 打印所有失败记录的详细信息用于调试
+                    if all_failed:
+                        logger.info("所有失败记录详情:")
+                        for idx, t in enumerate(all_failed[:10], 1):  # 只显示前10条
+                            logger.info(f"  记录 {idx}: ID={t.id}, 日期={t.date}, 标题={t.title}, 错误={t.errmsg[:50] if t.errmsg else 'None'}")
+                except TimeoutError as e:
+                    logger.error(f"查询所有失败记录超时: {str(e)}")
+                    errors.append(str(e))
+                    all_failed = []
+                except Exception as e:
+                    logger.error(f"查询所有失败记录失败: {str(e)}")
+                    errors.append(str(e))
+                    all_failed = []
                 
-                logger.info(f"找到 {len(failed_transfers)} 条符合条件的转移失败记录（超过{self._failed_transfer_age_hours}小时）")
+                # 查询转移失败的记录（使用datetime对象比较，添加超时保护）
+                try:
+                    failed_transfers = self._safe_file_operation(
+                        lambda: db.query(TransferHistory).filter(
+                            and_(
+                                TransferHistory.status == False,  # 转移失败
+                                TransferHistory.date <= cutoff_time  # 超过指定时间（使用datetime对象）
+                            )
+                        ).all(),
+                        "查询符合条件的失败记录",
+                        timeout=self.DB_QUERY_TIMEOUT
+                    )
+                    logger.info(f"找到 {len(failed_transfers)} 条符合条件的转移失败记录（超过{self._failed_transfer_age_hours}小时）")
+                except TimeoutError as e:
+                    logger.error(f"查询失败记录超时: {str(e)}")
+                    errors.append(str(e))
+                    failed_transfers = []
+                except Exception as e:
+                    logger.error(f"查询失败记录失败: {str(e)}")
+                    errors.append(str(e))
+                    failed_transfers = []
                 
-                for transfer in failed_transfers:
+                # 处理每个失败记录，添加进度日志
+                total_count = len(failed_transfers)
+                for idx, transfer in enumerate(failed_transfers, 1):
+                    # 每处理10个文件或每30秒记录一次进度
+                    if idx % 10 == 0 or idx == 1:
+                        logger.info(f"处理进度: {idx}/{total_count} ({idx*100//total_count if total_count > 0 else 0}%)")
+                    
+                    # 记录心跳，防止任务看起来卡死
+                    if idx % 50 == 0:
+                        logger.info(f"任务进行中... 已处理 {idx}/{total_count} 条记录")
                     try:
-                        logger.info(f"处理转移失败记录: ID={transfer.id}, 标题={transfer.title}, 日期={transfer.date}, 错误={transfer.errmsg}")
+                        logger.info(f"处理转移失败记录 [{idx}/{total_count}]: ID={transfer.id}, 标题={transfer.title}, 日期={transfer.date}, 错误={transfer.errmsg}")
                         
                         # 处理源文件
                         if transfer.src_fileitem:
@@ -850,16 +942,31 @@ class FileSweeper(_PluginBase):
                                         
                                         logger.info(f"使用原始文件夹名称: {folder_name}")
                                         
-                                        # 转移文件
+                                        # 转移文件（添加超时保护）
                                         logger.info(f"准备转移文件: {src_fileitem.path}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
-                                        success, error_msg, transferred_count = self._transfer_file_to_target(
-                                            src_fileitem, self._transfer_target_dir, folder_name
-                                        )
+                                        try:
+                                            success, error_msg, transferred_count = self._safe_file_operation(
+                                                lambda: self._transfer_file_to_target(
+                                                    src_fileitem, self._transfer_target_dir, folder_name
+                                                ),
+                                                f"转移文件: {src_fileitem.path}",
+                                                timeout=self.FILE_OPERATION_TIMEOUT
+                                            )
+                                        except TimeoutError as e:
+                                            error_msg = f"转移文件超时: {str(e)}"
+                                            logger.error(error_msg)
+                                            success = False
+                                            transferred_count = 0
+                                        except Exception as e:
+                                            error_msg = f"转移文件异常: {str(e)}"
+                                            logger.error(error_msg)
+                                            success = False
+                                            transferred_count = 0
                                         
                                         if success:
                                             logger.info(f"转移转移失败文件成功: {src_fileitem.path} -> {self._transfer_target_dir}/{folder_name}, 转移文件数: {transferred_count}")
                                             
-                                            # 检查原文件夹是否为空，如果为空则删除
+                                            # 检查原文件夹是否为空，如果为空则删除（添加超时保护）
                                             if src_fileitem.type == "dir":
                                                 src_path = Path(src_fileitem.path)
                                                 if src_path.exists() and src_path.is_dir():
@@ -867,8 +974,15 @@ class FileSweeper(_PluginBase):
                                                         # 检查文件夹是否为空
                                                         if not any(src_path.iterdir()):
                                                             storage_chain = StorageChain()
-                                                            storage_chain.delete_file(src_fileitem)
-                                                            logger.info(f"删除空文件夹: {src_fileitem.path}")
+                                                            try:
+                                                                self._safe_file_operation(
+                                                                    lambda: storage_chain.delete_file(src_fileitem),
+                                                                    f"删除空文件夹: {src_fileitem.path}",
+                                                                    timeout=self.FILE_OPERATION_TIMEOUT
+                                                                )
+                                                                logger.info(f"删除空文件夹: {src_fileitem.path}")
+                                                            except (TimeoutError, Exception) as e:
+                                                                logger.warning(f"删除空文件夹失败: {src_fileitem.path}, {str(e)}")
                                                     except Exception as e:
                                                         logger.warning(f"检查或删除空文件夹失败: {src_fileitem.path}, {str(e)}")
                                             
@@ -932,9 +1046,22 @@ class FileSweeper(_PluginBase):
                                                 logger.error(f"转移记录信息 - ID: {transfer.id}, 标题: {transfer.title}, 失败原因: {transfer.errmsg}")
                                                 errors.append(error_msg)
                                     elif should_delete:
-                                        # 删除模式
-                                        storage_chain = StorageChain()
-                                        success = storage_chain.delete_media_file(src_fileitem)
+                                        # 删除模式（添加超时保护）
+                                        try:
+                                            storage_chain = StorageChain()
+                                            success = self._safe_file_operation(
+                                                lambda: storage_chain.delete_media_file(src_fileitem),
+                                                f"删除文件: {src_fileitem.path}",
+                                                timeout=self.FILE_OPERATION_TIMEOUT
+                                            )
+                                        except TimeoutError as e:
+                                            error_msg = f"删除文件超时: {str(e)}"
+                                            logger.error(error_msg)
+                                            success = False
+                                        except Exception as e:
+                                            error_msg = f"删除文件异常: {str(e)}"
+                                            logger.error(error_msg)
+                                            success = False
 
                                         if success:
                                             logger.info(f"删除转移失败文件: {src_fileitem.path}")
@@ -1052,13 +1179,27 @@ class FileSweeper(_PluginBase):
                         logger.error(error_msg)
                         errors.append(error_msg)
                             
-                # 提交数据库更改
+                # 提交数据库更改（添加超时保护）
                 if not self._dry_run:
-                    db.commit()
-                    logger.info("数据库更改已提交")
+                    try:
+                        self._safe_file_operation(
+                            lambda: db.commit(),
+                            "提交数据库更改",
+                            timeout=self.DB_QUERY_TIMEOUT
+                        )
+                        logger.info("数据库更改已提交")
+                    except (TimeoutError, Exception) as e:
+                        logger.error(f"提交数据库更改失败: {str(e)}")
+                        db.rollback()
+                        errors.append(f"提交数据库更改失败: {str(e)}")
                 
             finally:
-                db.close()
+                # 确保数据库会话正确关闭
+                try:
+                    db.close()
+                    logger.debug("数据库会话已关闭")
+                except Exception as e:
+                    logger.warning(f"关闭数据库会话时出错: {str(e)}")
             
         except Exception as e:
             error_msg = f"清理转移失败文件时发生错误: {str(e)}"
@@ -1174,6 +1315,65 @@ class FileSweeper(_PluginBase):
             return float(s)
         except Exception:
             return default
+    
+    @contextmanager
+    def _timeout_context(self, timeout_seconds: int, operation_name: str):
+        """
+        超时上下文管理器，用于限制操作执行时间
+        
+        Args:
+            timeout_seconds: 超时时间（秒）
+            operation_name: 操作名称（用于日志）
+        """
+        def timeout_handler():
+            logger.warning(f"操作超时: {operation_name} (超时时间: {timeout_seconds}秒)")
+        
+        timer = None
+        try:
+            timer = threading.Timer(timeout_seconds, timeout_handler)
+            timer.start()
+            yield
+        finally:
+            if timer:
+                timer.cancel()
+    
+    def _safe_file_operation(self, operation_func, operation_name: str, timeout: int = None, *args, **kwargs):
+        """
+        安全的文件操作包装器，带超时保护
+        
+        Args:
+            operation_func: 要执行的操作函数
+            operation_name: 操作名称
+            timeout: 超时时间（秒），默认使用 FILE_OPERATION_TIMEOUT
+            *args, **kwargs: 传递给操作函数的参数
+            
+        Returns:
+            操作函数的返回值，如果超时则返回 None
+        """
+        if timeout is None:
+            timeout = self.FILE_OPERATION_TIMEOUT
+        
+        result = [None]
+        exception = [None]
+        
+        def run_operation():
+            try:
+                result[0] = operation_func(*args, **kwargs)
+            except Exception as e:
+                exception[0] = e
+        
+        thread = threading.Thread(target=run_operation, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        
+        if thread.is_alive():
+            logger.error(f"操作超时: {operation_name} (超时时间: {timeout}秒)")
+            raise TimeoutError(f"操作超时: {operation_name} (超时时间: {timeout}秒)")
+        
+        if exception[0]:
+            raise exception[0]
+        
+        return result[0]
 
     def run_service(self):
         """运行服务"""
