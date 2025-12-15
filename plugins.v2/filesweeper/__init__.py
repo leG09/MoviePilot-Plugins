@@ -534,7 +534,7 @@ class FileSweeper(_PluginBase):
                 src_path = Path(src_fileitem.path)
                 # 检查是否是本地文件
                 if src_fileitem.storage == "local" and src_path.exists():
-                    logger.debug(f"处理本地文件: {src_path}")
+                    logger.info(f"处理本地文件: {src_path}")
                     target_file = target_folder / src_path.name
                     if target_file.exists():
                         # 文件已存在，添加时间戳
@@ -574,7 +574,7 @@ class FileSweeper(_PluginBase):
                     # 非本地文件，使用 StorageChain 下载后转移
                     logger.info(f"处理非本地文件: {src_fileitem.path}, 存储类型: {src_fileitem.storage}")
                     # 下载文件到本地临时位置（添加超时保护）
-                    logger.debug(f"开始下载文件: {src_fileitem.path}")
+                    logger.info(f"开始下载文件: {src_fileitem.path}")
                     try:
                         local_file = self._safe_file_operation(
                             lambda: storage_chain.download_file(src_fileitem),
@@ -590,7 +590,7 @@ class FileSweeper(_PluginBase):
                         logger.error(error_msg)
                         raise
                     if local_file and local_file.exists():
-                        logger.debug(f"文件下载成功: {local_file}")
+                        logger.info(f"文件下载成功: {local_file}")
                         target_file = target_folder / Path(src_fileitem.path).name
                         if target_file.exists():
                             # 文件已存在，添加时间戳
@@ -604,7 +604,7 @@ class FileSweeper(_PluginBase):
                             logger.info(f"转移文件成功: {src_fileitem.path} -> {target_file}")
                             transferred_count += 1
                             # 删除源文件（添加超时保护）
-                            logger.debug(f"删除源文件: {src_fileitem.path}")
+                            logger.info(f"删除源文件: {src_fileitem.path}")
                             try:
                                 self._safe_file_operation(
                                     lambda: storage_chain.delete_file(src_fileitem),
@@ -626,7 +626,7 @@ class FileSweeper(_PluginBase):
                 src_path = Path(src_fileitem.path)
                 # 检查是否是本地文件夹
                 if src_fileitem.storage == "local" and src_path.exists() and src_path.is_dir():
-                    logger.debug(f"处理本地文件夹: {src_path}")
+                    logger.info(f"处理本地文件夹: {src_path}")
                     # 获取本地存储操作对象
                     from app.modules.filemanager.storages.local import LocalStorage
                     local_storage = LocalStorage()
@@ -672,7 +672,7 @@ class FileSweeper(_PluginBase):
                 else:
                     # 非本地文件夹，使用 StorageChain 列出文件（添加超时保护）
                     logger.info(f"处理非本地文件夹: {src_fileitem.path}, 存储类型: {src_fileitem.storage}")
-                    logger.debug(f"开始列出文件夹中的文件: {src_fileitem.path}")
+                    logger.info(f"开始列出文件夹中的文件: {src_fileitem.path}")
                     try:
                         files = self._safe_file_operation(
                             lambda: storage_chain.list_files(src_fileitem, recursion=True),
@@ -688,10 +688,10 @@ class FileSweeper(_PluginBase):
                         logger.error(error_msg)
                         raise
                     if files:
-                        logger.debug(f"找到 {len(files)} 个文件/文件夹")
+                        logger.info(f"找到 {len(files)} 个文件/文件夹")
                         for file_item in files:
                             if file_item.type == "file":
-                                logger.debug(f"处理文件: {file_item.path}")
+                                logger.info(f"处理文件: {file_item.path}")
                                 # 下载文件到本地临时位置（添加超时保护）
                                 try:
                                     local_file = self._safe_file_operation(
@@ -720,7 +720,7 @@ class FileSweeper(_PluginBase):
                                         logger.info(f"转移文件成功: {file_item.path} -> {target_file}")
                                         transferred_count += 1
                                         # 删除源文件（添加超时保护）
-                                        logger.debug(f"删除源文件: {file_item.path}")
+                                        logger.info(f"删除源文件: {file_item.path}")
                                         try:
                                             self._safe_file_operation(
                                                 lambda: storage_chain.delete_file(file_item),
@@ -835,7 +835,7 @@ class FileSweeper(_PluginBase):
                         # 处理源文件
                         if transfer.src_fileitem:
                             src_fileitem_data = transfer.src_fileitem
-                            logger.debug(f"源文件数据: {src_fileitem_data}")
+                            logger.info(f"源文件数据: {src_fileitem_data}")
                             
                             if isinstance(src_fileitem_data, dict):
                                 from app.schemas import FileItem
@@ -849,7 +849,7 @@ class FileSweeper(_PluginBase):
                                 
                                 # 读取大小（如有）用于统计
                                 file_size = int(src_fileitem_data.get("size", 0)) if isinstance(src_fileitem_data.get("size", 0), (int, float)) else 0
-                                logger.debug(f"文件大小: {file_size}")
+                                logger.info(f"文件大小: {file_size}")
                                 
                                 if not self._dry_run:
                                     # 先检查文件是否存在
@@ -864,7 +864,7 @@ class FileSweeper(_PluginBase):
                                         # 对于远程文件，假设文件存在，让后续操作处理
                                         # 如果文件不存在，后续操作会抛出异常，我们可以在那里捕获并删除记录
                                         file_exists = True
-                                        logger.debug(f"远程文件，假设存在，由后续操作验证: {src_fileitem.path}")
+                                        logger.info(f"远程文件，假设存在，由后续操作验证: {src_fileitem.path}")
                                     
                                     if not file_exists:
                                         # 文件不存在，直接删除转移记录
@@ -1197,7 +1197,7 @@ class FileSweeper(_PluginBase):
                 # 确保数据库会话正确关闭
                 try:
                     db.close()
-                    logger.debug("数据库会话已关闭")
+                    logger.info("数据库会话已关闭")
                 except Exception as e:
                     logger.warning(f"关闭数据库会话时出错: {str(e)}")
             
