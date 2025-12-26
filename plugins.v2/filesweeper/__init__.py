@@ -21,7 +21,7 @@ from app.core.security import verify_apikey
 from app.schemas import Notification, NotificationType, ContentType
 from app.schemas.types import EventType
 from app.log import logger
-from app.db import get_db, SessionFactory
+from app.db import get_db, ScopedSession
 from app.db.models.transferhistory import TransferHistory
 from app.chain.storage import StorageChain
 from app.core.event import eventmanager
@@ -36,7 +36,7 @@ class FileSweeper(_PluginBase):
     plugin_desc = "定时删除或转移MoviePilot转移失败的文件，支持智能模式根据失败原因自动决定删除或转移"
     plugin_icon = "refresh2.png"
     plugin_color = "#FF6B6B"
-    plugin_version = "2.8"
+    plugin_version = "2.9"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "filesweeper"
@@ -450,6 +450,9 @@ class FileSweeper(_PluginBase):
         try:
             logger.info("=== 开始执行转移失败文件清理任务 ===")
             
+            # 等待一小段时间，确保数据库连接完全就绪（特别是在重启后）
+            time.sleep(2)
+            
             cleaned_files = []
             cleaned_dirs = []
             total_size = 0
@@ -769,18 +772,14 @@ class FileSweeper(_PluginBase):
             
             logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str} (N小时前: {self._failed_transfer_age_hours})")
             
-            # 使用上下文管理器确保数据库会话正确关闭
-            db = SessionFactory()
+            # 使用 ScopedSession 确保数据库会话正确管理（线程安全）
+            db = ScopedSession()
             try:
-                # 先查询所有失败记录用于调试（添加超时保护）
+                # 先查询所有失败记录用于调试（直接执行，不在线程中）
                 try:
-                    all_failed = self._safe_file_operation(
-                        lambda: db.query(TransferHistory).filter(
-                            TransferHistory.status == False
-                        ).all(),
-                        "查询所有失败记录",
-                        timeout=self.DB_QUERY_TIMEOUT
-                    )
+                    all_failed = db.query(TransferHistory).filter(
+                        TransferHistory.status == False
+                    ).all()
                     logger.info(f"数据库中总共有 {len(all_failed)} 条转移失败记录")
                     
                     # 打印所有失败记录的详细信息用于调试
@@ -788,32 +787,20 @@ class FileSweeper(_PluginBase):
                         logger.info("所有失败记录详情:")
                         for idx, t in enumerate(all_failed[:10], 1):  # 只显示前10条
                             logger.info(f"  记录 {idx}: ID={t.id}, 日期={t.date}, 标题={t.title}, 错误={t.errmsg[:50] if t.errmsg else 'None'}")
-                except TimeoutError as e:
-                    logger.error(f"查询所有失败记录超时: {str(e)}")
-                    errors.append(str(e))
-                    all_failed = []
                 except Exception as e:
                     logger.error(f"查询所有失败记录失败: {str(e)}")
                     errors.append(str(e))
                     all_failed = []
                 
-                # 查询转移失败的记录（使用datetime对象比较，添加超时保护）
+                # 查询转移失败的记录（使用datetime对象比较，直接执行，不在线程中）
                 try:
-                    failed_transfers = self._safe_file_operation(
-                        lambda: db.query(TransferHistory).filter(
-                            and_(
-                                TransferHistory.status == False,  # 转移失败
-                                TransferHistory.date <= cutoff_time  # 超过指定时间（使用datetime对象）
-                            )
-                        ).all(),
-                        "查询符合条件的失败记录",
-                        timeout=self.DB_QUERY_TIMEOUT
-                    )
+                    failed_transfers = db.query(TransferHistory).filter(
+                        and_(
+                            TransferHistory.status == False,  # 转移失败
+                            TransferHistory.date <= cutoff_time  # 超过指定时间（使用datetime对象）
+                        )
+                    ).all()
                     logger.info(f"找到 {len(failed_transfers)} 条符合条件的转移失败记录（超过{self._failed_transfer_age_hours}小时）")
-                except TimeoutError as e:
-                    logger.error(f"查询失败记录超时: {str(e)}")
-                    errors.append(str(e))
-                    failed_transfers = []
                 except Exception as e:
                     logger.error(f"查询失败记录失败: {str(e)}")
                     errors.append(str(e))
@@ -1179,16 +1166,12 @@ class FileSweeper(_PluginBase):
                         logger.error(error_msg)
                         errors.append(error_msg)
                             
-                # 提交数据库更改（添加超时保护）
+                # 提交数据库更改（直接执行，不在线程中）
                 if not self._dry_run:
                     try:
-                        self._safe_file_operation(
-                            lambda: db.commit(),
-                            "提交数据库更改",
-                            timeout=self.DB_QUERY_TIMEOUT
-                        )
+                        db.commit()
                         logger.info("数据库更改已提交")
-                    except (TimeoutError, Exception) as e:
+                    except Exception as e:
                         logger.error(f"提交数据库更改失败: {str(e)}")
                         db.rollback()
                         errors.append(f"提交数据库更改失败: {str(e)}")
@@ -1355,12 +1338,15 @@ class FileSweeper(_PluginBase):
         
         result = [None]
         exception = [None]
+        completed = [False]
         
         def run_operation():
             try:
                 result[0] = operation_func(*args, **kwargs)
             except Exception as e:
                 exception[0] = e
+            finally:
+                completed[0] = True
         
         thread = threading.Thread(target=run_operation, daemon=True)
         thread.start()
@@ -1368,6 +1354,10 @@ class FileSweeper(_PluginBase):
         
         if thread.is_alive():
             logger.error(f"操作超时: {operation_name} (超时时间: {timeout}秒)")
+            # 等待一小段时间让线程有机会完成
+            thread.join(timeout=1)
+            if thread.is_alive():
+                logger.warning(f"操作线程仍在运行，但由于是守护线程，将在主线程退出时自动终止")
             raise TimeoutError(f"操作超时: {operation_name} (超时时间: {timeout}秒)")
         
         if exception[0]:
