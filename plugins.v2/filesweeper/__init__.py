@@ -466,6 +466,40 @@ class FileSweeper(_PluginBase):
         try:
             logger.info("=== 开始执行转移失败文件清理任务 ===")
             
+            # 首先检查数据库是否就绪（避免在数据库未初始化时执行）
+            try:
+                db_test = ScopedSession()
+                try:
+                    # 尝试执行一个简单的查询来检查数据库是否就绪
+                    db_test.execute(select(1))
+                    db_test.close()
+                    logger.info("数据库连接检查通过")
+                except Exception as e:
+                    db_test.close()
+                    error_msg = f"数据库未就绪，跳过本次执行: {str(e)}"
+                    logger.warning(error_msg)
+                    return {
+                        "success": False,
+                        "message": error_msg,
+                        "cleaned_files": [],
+                        "cleaned_dirs": [],
+                        "total_size": 0,
+                        "errors": [error_msg],
+                        "dry_run": self._dry_run
+                    }
+            except Exception as e:
+                error_msg = f"无法创建数据库会话，跳过本次执行: {str(e)}"
+                logger.warning(error_msg)
+                return {
+                    "success": False,
+                    "message": error_msg,
+                    "cleaned_files": [],
+                    "cleaned_dirs": [],
+                    "total_size": 0,
+                    "errors": [error_msg],
+                    "dry_run": self._dry_run
+                }
+            
             cleaned_files = []
             cleaned_dirs = []
             total_size = 0
