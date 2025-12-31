@@ -363,15 +363,31 @@ class FileSweeper(_PluginBase):
         """
         注册插件公共服务
         """
-        if self._enabled and self._cron:
-            return [{
-                "id": "FileSweeper",
-                "name": "转移失败文件清理服务",
-                "trigger": CronTrigger.from_crontab(self._cron),
-                "func": self._execute_clean,
-                "kwargs": {}
-            }]
-        return []
+        try:
+            logger.info(f"FileSweeper: 开始注册服务，启用状态: {self._enabled}, cron: {self._cron}")
+            if self._enabled and self._cron:
+                try:
+                    # 验证并创建 cron trigger
+                    trigger = CronTrigger.from_crontab(self._cron)
+                    logger.info(f"FileSweeper: CronTrigger 创建成功: {self._cron}")
+                    return [{
+                        "id": "FileSweeper",
+                        "name": "转移失败文件清理服务",
+                        "trigger": trigger,
+                        "func": self._execute_clean,
+                        "kwargs": {}
+                    }]
+                except Exception as e:
+                    logger.error(f"FileSweeper: 创建 CronTrigger 失败: {str(e)}, cron: {self._cron}")
+                    return []
+            else:
+                logger.info(f"FileSweeper: 服务未启用或未配置 cron")
+            return []
+        except Exception as e:
+            logger.error(f"FileSweeper: get_service() 执行失败: {str(e)}")
+            import traceback
+            logger.error(f"FileSweeper: 错误详情:\n{traceback.format_exc()}")
+            return []
 
     def stop_service(self):
         """停止插件"""
@@ -449,9 +465,6 @@ class FileSweeper(_PluginBase):
         """
         try:
             logger.info("=== 开始执行转移失败文件清理任务 ===")
-            
-            # 等待一小段时间，确保数据库连接完全就绪（特别是在重启后）
-            time.sleep(2)
             
             cleaned_files = []
             cleaned_dirs = []
@@ -773,7 +786,34 @@ class FileSweeper(_PluginBase):
             logger.info(f"查询转移失败的文件，时间阈值: {cutoff_time_str} (N小时前: {self._failed_transfer_age_hours})")
             
             # 使用 ScopedSession 确保数据库会话正确管理（线程安全）
-            db = ScopedSession()
+            # 添加重试机制，确保数据库连接就绪（特别是在重启后）
+            db = None
+            max_retries = 3
+            retry_delay = 1  # 秒
+            
+            for retry in range(max_retries):
+                try:
+                    db = ScopedSession()
+                    # 测试数据库连接是否可用
+                    db.execute(select(1))
+                    logger.info(f"数据库连接成功（尝试 {retry + 1}/{max_retries}）")
+                    break
+                except Exception as e:
+                    if retry < max_retries - 1:
+                        logger.warning(f"数据库连接失败（尝试 {retry + 1}/{max_retries}），{retry_delay}秒后重试: {str(e)}")
+                        time.sleep(retry_delay)
+                        if db:
+                            try:
+                                db.close()
+                            except:
+                                pass
+                    else:
+                        logger.error(f"数据库连接失败，已达到最大重试次数: {str(e)}")
+                        raise
+            
+            if not db:
+                raise Exception("无法建立数据库连接")
+            
             try:
                 # 先查询所有失败记录用于调试（直接执行，不在线程中）
                 try:
