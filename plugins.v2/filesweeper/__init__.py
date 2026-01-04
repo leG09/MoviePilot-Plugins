@@ -138,7 +138,8 @@ class FileSweeper(_PluginBase):
 
     def get_api(self) -> list:
         """获取API接口"""
-        return [
+        logger.info(f"FileSweeper: 注册API接口，插件类名: {self.__class__.__name__}")
+        apis = [
             {
                 "path": "/manual_clean",
                 "endpoint": self.manual_clean,
@@ -162,6 +163,10 @@ class FileSweeper(_PluginBase):
                 "description": "通过Webhook外部触发清理任务，支持GET和POST请求。如果配置了webhook_token，需要通过URL参数token或Header Authorization传递。"
             }
         ]
+        logger.info(f"FileSweeper: 注册了 {len(apis)} 个API接口")
+        for api in apis:
+            logger.info(f"FileSweeper: API路径: {api['path']}, 方法: {api['methods']}, 匿名访问: {api.get('allow_anonymous', False)}")
+        return apis
 
     def get_form(self) -> tuple:
         """获取配置表单"""
