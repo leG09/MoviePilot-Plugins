@@ -569,21 +569,37 @@ class FileSweeper(_PluginBase):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
-    async def webhook_endpoint(self, request: Request) -> Dict[str, Any]:
+    def webhook_endpoint(self, request: Request) -> Dict[str, Any]:
         """
         Webhook端点，支持外部调用（无需API密钥）
         
         Args:
-            request: FastAPI请求对象
+            request: FastAPI请求对象，用于获取headers和query参数
             
         Returns:
             Dict: 执行结果
         """
         try:
+            # 从 headers 或 query 参数获取 token
+            token = None
+            if request:
+                # 优先从 Authorization header 获取
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header:
+                    # 支持 "Bearer token" 或直接 "token" 格式
+                    if auth_header.startswith("Bearer "):
+                        token = auth_header[7:].strip()
+                    else:
+                        token = auth_header.strip()
+                
+                # 如果 header 中没有，从 query 参数获取
+                if not token:
+                    token = request.query_params.get("token")
+            
             # 验证 token（如果配置了）
             if self._webhook_token:
-                token = request.headers.get("Authorization") or request.query_params.get("token")
                 if not token:
+                    logger.warning("Webhook token验证失败: 缺少访问令牌")
                     raise HTTPException(status_code=401, detail="缺少访问令牌")
                 if token != self._webhook_token:
                     logger.warning(f"Webhook token验证失败: 期望'{self._webhook_token}', 实际'{token}'")
@@ -591,10 +607,8 @@ class FileSweeper(_PluginBase):
             
             logger.info("收到Webhook请求，开始执行转移失败文件清理任务")
             
-            # 在后台线程中执行清理任务，避免阻塞
-            import asyncio
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, self._execute_clean)
+            # 执行清理任务
+            result = self._execute_clean()
             
             return {
                 "success": result.get("success", False),
@@ -607,6 +621,8 @@ class FileSweeper(_PluginBase):
         except Exception as e:
             error_msg = f"Webhook执行失败：{str(e)}"
             logger.error(error_msg)
+            import traceback
+            logger.error(f"错误详情:\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     def _execute_clean(self) -> Dict[str, Any]:
