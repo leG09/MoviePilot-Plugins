@@ -157,8 +157,9 @@ class FileSweeper(_PluginBase):
                 "path": "/webhook",
                 "endpoint": self.webhook_endpoint,
                 "methods": ["GET", "POST"],
+                "allow_anonymous": True,  # 允许匿名访问，跳过 MoviePilot 的 API key 验证
                 "summary": "Webhook端点（外部调用）",
-                "description": "通过Webhook外部触发清理任务，支持GET和POST请求"
+                "description": "通过Webhook外部触发清理任务，支持GET和POST请求。如果配置了webhook_token，需要通过URL参数token或Header Authorization传递。"
             }
         ]
 
