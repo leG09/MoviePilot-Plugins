@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from fastapi import Request, HTTPException
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
 try:
     from typing_extensions import Annotated
 except ImportError:
@@ -64,6 +67,12 @@ class FileSweeper(_PluginBase):
         self._smart_mode = config.get("smart_mode", False) if config else False
         self._duplicate_file_delete = config.get("duplicate_file_delete", True) if config else True  # "存在同名文件"是否删除
         
+        # 立即运行一次选项
+        self._onlyonce = config.get("onlyonce", False) if config else False
+        
+        # Webhook token（用于外部调用）
+        self._webhook_token = config.get("webhook_token", "") if config else ""
+        
         logger.info(f"FileSweeper插件初始化完成，启用状态: {self._enabled}")
         if self._enabled:
             logger.info(f"定时任务: {self._cron}")
@@ -75,6 +84,38 @@ class FileSweeper(_PluginBase):
                 logger.info(f"处理模式: {'转移' if self._transfer_mode == 'transfer' else '删除'}")
             if self._transfer_mode == "transfer" or self._smart_mode:
                 logger.info(f"转移目标目录: {self._transfer_target_dir}")
+        
+        # 立即运行一次
+        if self._onlyonce:
+            logger.info("FileSweeper服务启动，立即运行一次")
+            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._scheduler.add_job(
+                func=self._execute_clean,
+                trigger='date',
+                run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                name="转移失败文件清理",
+            )
+            # 启动任务
+            if self._scheduler.get_jobs():
+                self._scheduler.print_jobs()
+                self._scheduler.start()
+            
+            # 关闭一次性开关
+            self._onlyonce = False
+            # 保存配置
+            self.update_config({
+                "enabled": self._enabled,
+                "cron": self._cron,
+                "dry_run": self._dry_run,
+                "send_notification": self._send_notification,
+                "failed_transfer_age_hours": self._failed_transfer_age_hours,
+                "transfer_mode": self._transfer_mode,
+                "transfer_target_dir": self._transfer_target_dir,
+                "smart_mode": self._smart_mode,
+                "duplicate_file_delete": self._duplicate_file_delete,
+                "onlyonce": self._onlyonce,
+                "webhook_token": self._webhook_token
+            })
 
     def get_state(self) -> bool:
         """获取插件状态"""
@@ -111,6 +152,13 @@ class FileSweeper(_PluginBase):
                 "methods": ["POST"],
                 "summary": "预览转移失败文件清理",
                 "description": "预览将要清理的转移失败文件，不实际删除"
+            },
+            {
+                "path": "/webhook",
+                "endpoint": self.webhook_endpoint,
+                "methods": ["GET", "POST"],
+                "summary": "Webhook端点（外部调用）",
+                "description": "通过Webhook外部触发清理任务，支持GET和POST请求"
             }
         ]
 
@@ -201,6 +249,20 @@ class FileSweeper(_PluginBase):
                                             "model": "send_notification",
                                             "label": "发送通知",
                                             "color": "primary"
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "onlyonce",
+                                            "label": "立即运行一次",
+                                            "color": "success"
                                         }
                                     }
                                 ]
@@ -331,6 +393,44 @@ class FileSweeper(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "webhook_token",
+                                            "label": "Webhook访问令牌（可选）",
+                                            "placeholder": "留空则无需验证，设置后外部调用需要提供此token",
+                                            "hint": "用于Webhook外部调用的安全验证，可通过URL参数token或Header Authorization传递"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "text": "Webhook调用地址：/api/v1/plugin/filesweeper/webhook?token=YOUR_TOKEN（如果配置了token）或 /api/v1/plugin/filesweeper/webhook（如果未配置token）"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
                                         "component": "VAlert",
                                         "props": {
                                             "type": "warning",
@@ -352,7 +452,9 @@ class FileSweeper(_PluginBase):
             "transfer_mode": "delete",
             "transfer_target_dir": "",
             "smart_mode": False,
-            "duplicate_file_delete": True
+            "duplicate_file_delete": True,
+            "onlyonce": False,
+            "webhook_token": ""
         }
 
     def get_page(self) -> list:
@@ -391,6 +493,16 @@ class FileSweeper(_PluginBase):
 
     def stop_service(self):
         """停止插件"""
+        try:
+            # 停止立即运行一次的调度器
+            if hasattr(self, '_scheduler') and self._scheduler:
+                try:
+                    self._scheduler.shutdown()
+                    logger.info("FileSweeper立即运行调度器已停止")
+                except Exception as e:
+                    logger.warning(f"停止调度器时出错: {str(e)}")
+        except Exception as e:
+            logger.warning(f"停止服务时出错: {str(e)}")
         logger.info("FileSweeper插件已停止")
 
     def manual_clean(self, request_data: Dict[str, Any], apikey: Annotated[str, verify_apikey]) -> Dict[str, Any]:
@@ -455,6 +567,46 @@ class FileSweeper(_PluginBase):
             error_msg = f"预览转移失败文件清理任务失败：{str(e)}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
+
+    async def webhook_endpoint(self, request: Request) -> Dict[str, Any]:
+        """
+        Webhook端点，支持外部调用（无需API密钥）
+        
+        Args:
+            request: FastAPI请求对象
+            
+        Returns:
+            Dict: 执行结果
+        """
+        try:
+            # 验证 token（如果配置了）
+            if self._webhook_token:
+                token = request.headers.get("Authorization") or request.query_params.get("token")
+                if not token:
+                    raise HTTPException(status_code=401, detail="缺少访问令牌")
+                if token != self._webhook_token:
+                    logger.warning(f"Webhook token验证失败: 期望'{self._webhook_token}', 实际'{token}'")
+                    raise HTTPException(status_code=401, detail="无效的访问令牌")
+            
+            logger.info("收到Webhook请求，开始执行转移失败文件清理任务")
+            
+            # 在后台线程中执行清理任务，避免阻塞
+            import asyncio
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, self._execute_clean)
+            
+            return {
+                "success": result.get("success", False),
+                "message": result.get("message", "执行完成"),
+                "result": result
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = f"Webhook执行失败：{str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
 
     def _execute_clean(self) -> Dict[str, Any]:
         """
