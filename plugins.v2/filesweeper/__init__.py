@@ -53,6 +53,9 @@ class FileSweeper(_PluginBase):
         """初始化插件"""
         self._enabled = config.get("enabled", False) if config else False
         self._cron = config.get("cron", "0 2 * * *") if config else "0 2 * * *"  # 默认每天凌晨2点执行
+        # 确保 cron 不为空
+        if not self._cron or not self._cron.strip():
+            self._cron = "0 2 * * *"
         self._dry_run = config.get("dry_run", False) if config else False
         self._send_notification = config.get("send_notification", True) if config else True
         
@@ -471,28 +474,26 @@ class FileSweeper(_PluginBase):
         """
         注册插件公共服务
         """
-        try:
-            logger.info(f"FileSweeper: 开始注册服务，启用状态: {self._enabled}, cron: {self._cron}")
-            if self._enabled and self._cron:
-                try:
-                    # 验证并创建 cron trigger
-                    trigger = CronTrigger.from_crontab(self._cron)
-                    logger.info(f"FileSweeper: CronTrigger 创建成功: {self._cron}")
-                    return [{
-                        "id": "FileSweeper",
-                        "name": "转移失败文件清理服务",
-                        "trigger": trigger,
-                        "func": self._execute_clean,
-                        "kwargs": {}
-                    }]
-                except Exception as e:
-                    logger.error(f"FileSweeper: 创建 CronTrigger 失败: {str(e)}, cron: {self._cron}")
-                    return []
-            else:
-                logger.info(f"FileSweeper: 服务未启用或未配置 cron")
+        if not self.get_state():
+            logger.debug(f"FileSweeper: 插件未启用，跳过服务注册")
             return []
+        
+        if not self._cron or not self._cron.strip():
+            logger.debug(f"FileSweeper: cron 表达式为空，跳过服务注册")
+            return []
+        
+        try:
+            trigger = CronTrigger.from_crontab(self._cron)
+            logger.info(f"FileSweeper: 注册定时服务，cron: {self._cron}")
+            return [{
+                "id": "FileSweeper",
+                "name": "转移失败文件清理服务",
+                "trigger": trigger,
+                "func": self._execute_clean,
+                "kwargs": {}
+            }]
         except Exception as e:
-            logger.error(f"FileSweeper: get_service() 执行失败: {str(e)}")
+            logger.error(f"FileSweeper: 创建 CronTrigger 失败: {str(e)}, cron: {self._cron}")
             import traceback
             logger.error(f"FileSweeper: 错误详情:\n{traceback.format_exc()}")
             return []
