@@ -555,6 +555,44 @@ class GDCloudLinkMonitor(_PluginBase):
                 else:
                     logger.debug("未检测到网盘限制错误")
                 
+                # 如果日志文件不存在或没有错误，检查是否需要恢复被禁用的目录
+                log_file = self._get_latest_log_file_path()
+                if not log_file or not log_file.exists():
+                    # 日志文件不存在，恢复所有被禁用的目录
+                    if self._disabled_destinations:
+                        logger.info("日志文件不存在，恢复所有被禁用的目录")
+                        disabled_list = list(self._disabled_destinations.keys())
+                        for dest_path in disabled_list:
+                            self._enable_destination(dest_path)
+                            if self._notify:
+                                self.post_message(
+                                    title="目标目录恢复",
+                                    text=f"日志文件不存在，目标目录 {dest_path} 已重新启用。",
+                                    mtype=NotificationType.Manual
+                                )
+                elif not error_counts:
+                    # 日志文件存在但没有错误，检查被禁用的目录是否可以恢复
+                    # 如果禁用时间超过恢复检查间隔，或者日志文件最近被清空（修改时间较新），则恢复
+                    if self._disabled_destinations:
+                        log_mtime = log_file.stat().st_mtime
+                        log_mtime_dt = datetime.datetime.fromtimestamp(log_mtime)
+                        current_time = datetime.datetime.now()
+                        
+                        for dest_path, info in list(self._disabled_destinations.items()):
+                            disabled_time = info['disabled_time']
+                            time_diff = (current_time - disabled_time).total_seconds()
+                            
+                            # 如果禁用时间超过恢复检查间隔，或者日志文件在禁用后被修改（说明日志已清空），则恢复
+                            if time_diff > self._recovery_check_interval or log_mtime_dt > disabled_time:
+                                logger.info(f"日志文件无错误且满足恢复条件，恢复目标目录：{dest_path}")
+                                self._enable_destination(dest_path)
+                                if self._notify:
+                                    self.post_message(
+                                        title="目标目录恢复",
+                                        text=f"日志文件无错误，目标目录 {dest_path} 已重新启用。",
+                                        mtype=NotificationType.Manual
+                                    )
+                
                 # 处理错误超过阈值的挂载目录
                 for mount_path, count in error_counts.items():
                     logger.info(f"挂载路径 {mount_path} 错误次数：{count}，阈值：{self._error_threshold}")
@@ -603,20 +641,51 @@ class GDCloudLinkMonitor(_PluginBase):
             try:
                 current_time = datetime.datetime.now()
                 
+                # 检查日志文件状态
+                log_file = None
+                log_exists = False
+                log_has_errors = False
+                
+                if self._log_monitor_enabled and self._log_path:
+                    log_file = self._get_latest_log_file_path()
+                    if log_file and log_file.exists():
+                        log_exists = True
+                        # 检查日志文件是否有错误
+                        error_counts = self._check_cloud_errors()
+                        log_has_errors = bool(error_counts)
+                
                 # 检查被禁用的目录是否可以恢复
                 for dest_path, info in list(self._disabled_destinations.items()):
                     disabled_time = info['disabled_time']
                     time_diff = (current_time - disabled_time).total_seconds()
                     
-                    # 如果禁用时间超过恢复检查间隔，尝试恢复
+                    should_recover = False
+                    recover_reason = ""
+                    
+                    # 恢复条件1：禁用时间超过恢复检查间隔
                     if time_diff > self._recovery_check_interval:
-                        # 简单的恢复策略：超过恢复间隔就重新启用
+                        should_recover = True
+                        recover_reason = "超过恢复检查间隔"
+                    # 恢复条件2：日志文件不存在
+                    elif self._log_monitor_enabled and not log_exists:
+                        should_recover = True
+                        recover_reason = "日志文件不存在"
+                    # 恢复条件3：日志文件存在但没有错误，且日志文件在禁用后被修改（说明日志已清空）
+                    elif self._log_monitor_enabled and log_exists and not log_has_errors and log_file:
+                        log_mtime = log_file.stat().st_mtime
+                        log_mtime_dt = datetime.datetime.fromtimestamp(log_mtime)
+                        if log_mtime_dt > disabled_time:
+                            should_recover = True
+                            recover_reason = "日志文件无错误且已被清空"
+                    
+                    if should_recover:
+                        logger.info(f"恢复目标目录 {dest_path}，原因：{recover_reason}")
                         self._enable_destination(dest_path)
                         
                         if self._notify:
                             self.post_message(
                                 title="目标目录恢复",
-                                text=f"目标目录 {dest_path} 已重新启用。",
+                                text=f"目标目录 {dest_path} 已重新启用（{recover_reason}）。",
                                 mtype=NotificationType.Manual
                             )
                 
