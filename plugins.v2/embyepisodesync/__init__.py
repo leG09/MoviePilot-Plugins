@@ -638,16 +638,21 @@ class EmbyEpisodeSync(_PluginBase):
                             logger.info(f"  新增集数: {added_episodes}")
                         logger.info(f"  新集数: {new_episodes}")
                         
-                        # 更新订阅的note字段：使用独立 session 在同一事务内查询并修改，
-                        # 避免 SubscribeOper.update 在无 db 时 get/update 分离导致 detached 对象无法正确持久化
+                        # 更新订阅的note字段：使用 query().update() 直接执行 UPDATE，避免 ORM 对 JSON 的
+                        # dirty 追踪不生效或 detached 对象导致更新未持久化
                         _session = SessionFactory()
                         try:
-                            _sub = _session.query(Subscribe).filter(Subscribe.id == subscribe.id).first()
-                            if _sub:
-                                _sub.note = new_episodes
+                            _cnt = _session.query(Subscribe).filter(
+                                Subscribe.id == subscribe.id
+                            ).update({"note": new_episodes}, synchronize_session=False)
                             _session.commit()
-                        except Exception:
+                            if _cnt == 0:
+                                logger.warning(
+                                    f"订阅 {subscribe.name} S{subscribe.season:02d} 更新 note 未匹配到行 id={subscribe.id}"
+                                )
+                        except Exception as _e:
                             _session.rollback()
+                            logger.error(f"更新订阅 note 失败 (id={subscribe.id}): {_e}")
                             raise
                         finally:
                             _session.close()
