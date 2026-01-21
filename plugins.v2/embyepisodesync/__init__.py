@@ -305,62 +305,8 @@ class EmbyEpisodeSync(_PluginBase):
             "test_limit": 10
         }
     
-    def get_page(self) -> list:
-        """获取插件页面"""
-        return [
-            {
-                "component": "VCard",
-                "content": [
-                    {
-                        "component": "VCardTitle",
-                        "props": {
-                            "class": "pa-2"
-                        },
-                        "content": [
-                            {
-                                "component": "span",
-                                "text": "测试运行"
-                            }
-                        ]
-                    },
-                    {
-                        "component": "VCardText",
-                        "content": [
-                            {
-                                "component": "VAlert",
-                                "props": {
-                                    "type": "info",
-                                    "text": "测试运行功能会使用配置的测试模式限制数量，只处理少量数据用于测试。不会影响正常运行的定时任务。"
-                                }
-                            },
-                            {
-                                "component": "VRow",
-                                "content": [
-                                    {
-                                        "component": "VCol",
-                                        "props": {
-                                            "cols": 12
-                                        },
-                                        "content": [
-                                            {
-                                                "component": "VBtn",
-                                                "props": {
-                                                    "color": "primary",
-                                                    "variant": "elevated",
-                                                    "block": True,
-                                                    "onClick": "testSync"
-                                                },
-                                                "text": "测试运行同步任务"
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            }
-        ]
+    def get_page(self) -> List[dict]:
+        pass
     
     def get_service(self) -> List[Dict[str, Any]]:
         """
