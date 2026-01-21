@@ -11,7 +11,9 @@ from app.core.event import eventmanager, Event
 from app.schemas import Notification, NotificationType
 from app.schemas.types import EventType, MediaType
 from app.log import logger
+from app.db import SessionFactory
 from app.db.subscribe_oper import SubscribeOper
+from app.db.models.subscribe import Subscribe
 from app.helper.mediaserver import MediaServerHelper
 from app.chain.media import MediaChain
 try:
@@ -690,10 +692,19 @@ class EmbyEpisodeSync(_PluginBase):
                             logger.info(f"  新增集数: {added_episodes}")
                         logger.info(f"  新集数: {new_episodes}")
                         
-                        # 更新订阅的note字段
-                        subscribe_oper.update(subscribe.id, {
-                            "note": new_episodes
-                        })
+                        # 更新订阅的note字段：使用独立 session 在同一事务内查询并修改，
+                        # 避免 SubscribeOper.update 在无 db 时 get/update 分离导致 detached 对象无法正确持久化
+                        _session = SessionFactory()
+                        try:
+                            _sub = _session.query(Subscribe).filter(Subscribe.id == subscribe.id).first()
+                            if _sub:
+                                _sub.note = new_episodes
+                            _session.commit()
+                        except Exception:
+                            _session.rollback()
+                            raise
+                        finally:
+                            _session.close()
                         
                         updated_count += 1
                         updated_subscribes.append({
@@ -1016,7 +1027,8 @@ class EmbyEpisodeSync(_PluginBase):
                                 mediainfo=mediainfo,
                                 season=season,
                                 note=episodes_list,
-                                state='N'
+                                state='N',
+                                username="EmbyEpisodeSync"
                             )
                             
                             # 校正总集数与缺失集，避免显示负数
