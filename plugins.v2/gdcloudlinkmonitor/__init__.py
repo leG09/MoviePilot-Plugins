@@ -1552,10 +1552,29 @@ class GDCloudLinkMonitor(_PluginBase):
                     # 转移失败
                     logger.warn(f"{file_path.name} 入库失败：{transferinfo.message}")
 
+                    # 检查是否是因为文件已存在且覆盖模式为never导致的失败
+                    msg_text = (transferinfo.message or "").lower()
+                    overwrite_mode = self._overwrite_mode.get(mon_path) or 'never'
+                    is_file_exists_error = any(k in msg_text for k in ["已存在", "exist", "exists", "同名", "already exists"])
+                    
+                    if is_file_exists_error and overwrite_mode == 'never':
+                        # 文件已存在且覆盖模式为never，写一条失败记录后跳过处理，避免死循环
+                        logger.info(f"文件已存在于目标位置且覆盖模式为never，记录失败后跳过处理：{event_path}")
+                        if self._history:
+                            # 新增转移失败历史记录，避免下次轮询时再次尝试转移
+                            self.transferhis.add_fail(
+                                fileitem=file_item,
+                                mode=transfer_type,
+                                meta=file_meta,
+                                mediainfo=mediainfo,
+                                transferinfo=transferinfo
+                            )
+                        return
+
                     if self._history:
                         # 新增转移失败历史记录
                         self.transferhis.add_fail(
-                            fileitem=file_item,
+                            fileitem=file_item, 
                             mode=transfer_type,
                             meta=file_meta,
                             mediainfo=mediainfo,
