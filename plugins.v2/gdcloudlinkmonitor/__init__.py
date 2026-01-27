@@ -1557,13 +1557,29 @@ class GDCloudLinkMonitor(_PluginBase):
                     logger.error("文件转移模块运行失败")
                     return
 
-                if not transferinfo.success:
+                # 检查转移结果
+                transfer_success = getattr(transferinfo, 'success', None)
+                transfer_message = getattr(transferinfo, 'message', '') or ''
+                
+                # 检查是否是失败（success为False，或者消息中包含错误关键词）
+                is_failure = (transfer_success is False) or (
+                    transfer_message and any(k in transfer_message.lower() for k in [
+                        "失败", "错误", "同名", "已存在", "不覆盖", "覆盖模式", 
+                        "exist", "exists", "error", "fail"
+                    ])
+                )
+                
+                logger.debug(f"转移结果检查 - success: {transfer_success}, message: {transfer_message[:100] if transfer_message else 'None'}, is_failure: {is_failure}")
+                
+                if is_failure:
                     # 转移失败
-                    logger.warn(f"{file_path.name} 入库失败：{transferinfo.message}")
+                    logger.warn(f"{file_path.name} 入库失败：{transfer_message}")
+                    logger.debug(f"转移失败详情 - delete_local_on_conflict: {self._delete_local_on_conflict}, delete_local_on_failure: {self._delete_local_on_failure}")
                     
                     # 检查是否是同名文件冲突
-                    msg_text = (transferinfo.message or "").lower()
+                    msg_text = transfer_message.lower()
                     is_conflict = any(k in msg_text for k in ["同名", "已存在", "exist", "exists", "不覆盖", "覆盖模式"])
+                    logger.debug(f"冲突检测 - is_conflict: {is_conflict}")
                     
                     # 如果启用删除本地文件选项且是同名冲突，删除本地文件
                     if self._delete_local_on_conflict and is_conflict:
@@ -1574,8 +1590,12 @@ class GDCloudLinkMonitor(_PluginBase):
                                 logger.info(f"已删除本地文件：{file_path}")
                                 # 删除成功后，直接返回，避免死循环
                                 return
+                            else:
+                                logger.warn(f"文件不存在，无法删除：{file_path}")
                         except Exception as e:
                             logger.error(f"删除本地文件失败：{e}")
+                    elif self._delete_local_on_conflict and not is_conflict:
+                        logger.debug(f"同名冲突删除选项已启用，但未检测到冲突，跳过删除")
                     
                     # 如果启用转移失败删除本地文件选项，删除本地文件
                     if self._delete_local_on_failure:
@@ -1586,8 +1606,12 @@ class GDCloudLinkMonitor(_PluginBase):
                                 logger.info(f"已删除本地文件：{file_path}")
                                 # 删除成功后，直接返回，避免重复处理
                                 return
+                            else:
+                                logger.warn(f"文件不存在，无法删除：{file_path}")
                         except Exception as e:
                             logger.error(f"删除本地文件失败：{e}")
+                    elif self._delete_local_on_failure:
+                        logger.debug(f"转移失败删除选项已启用，但文件不存在，跳过删除")
 
                     if self._history:
                         # 新增转移失败历史记录
