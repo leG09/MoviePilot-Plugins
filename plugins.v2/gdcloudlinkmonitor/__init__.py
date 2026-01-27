@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.1" 
+    plugin_version = "3.1.2" 
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -117,6 +117,8 @@ class GDCloudLinkMonitor(_PluginBase):
     # 存储源目录转移方式
     _transferconf: Dict[str, Optional[str]] = {}
     _overwrite_mode: Dict[str, Optional[str]] = {}
+    _delete_local_on_conflict = False  # 同名文件冲突时删除本地文件
+    _delete_local_on_failure = False  # 转移失败时删除本地文件
     _medias = {}
     # 退出事件
     _event = threading.Event()
@@ -1091,6 +1093,11 @@ class GDCloudLinkMonitor(_PluginBase):
                 self._ai_key_index = saved_index if self._ai_api_keys else -1
             self._ai_timeout = int(config.get("ai_timeout", 30))
             self._ai_cache_days = int(config.get("ai_cache_days", 5))
+            
+            # 同名文件冲突时删除本地文件配置
+            self._delete_local_on_conflict = config.get("delete_local_on_conflict", False)
+            # 转移失败时删除本地文件配置
+            self._delete_local_on_failure = config.get("delete_local_on_failure", False)
 
         # 停止现有任务
         self.stop_service()
@@ -1252,6 +1259,8 @@ class GDCloudLinkMonitor(_PluginBase):
             "ai_timeout": self._ai_timeout,
             "ai_cache_days": self._ai_cache_days,
             "ai_prompt_template": self._ai_prompt_template,
+            "delete_local_on_conflict": self._delete_local_on_conflict,
+            "delete_local_on_failure": self._delete_local_on_failure,
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -1551,6 +1560,34 @@ class GDCloudLinkMonitor(_PluginBase):
                 if not transferinfo.success:
                     # 转移失败
                     logger.warn(f"{file_path.name} 入库失败：{transferinfo.message}")
+                    
+                    # 检查是否是同名文件冲突
+                    msg_text = (transferinfo.message or "").lower()
+                    is_conflict = any(k in msg_text for k in ["同名", "已存在", "exist", "exists", "不覆盖", "覆盖模式"])
+                    
+                    # 如果启用删除本地文件选项且是同名冲突，删除本地文件
+                    if self._delete_local_on_conflict and is_conflict:
+                        try:
+                            if file_path.exists():
+                                logger.info(f"检测到同名文件冲突，删除本地文件：{file_path}")
+                                file_path.unlink()
+                                logger.info(f"已删除本地文件：{file_path}")
+                                # 删除成功后，直接返回，避免死循环
+                                return
+                        except Exception as e:
+                            logger.error(f"删除本地文件失败：{e}")
+                    
+                    # 如果启用转移失败删除本地文件选项，删除本地文件
+                    if self._delete_local_on_failure:
+                        try:
+                            if file_path.exists():
+                                logger.info(f"转移失败，删除本地文件：{file_path}")
+                                file_path.unlink()
+                                logger.info(f"已删除本地文件：{file_path}")
+                                # 删除成功后，直接返回，避免重复处理
+                                return
+                        except Exception as e:
+                            logger.error(f"删除本地文件失败：{e}")
 
                     if self._history:
                         # 新增转移失败历史记录
@@ -1908,6 +1945,23 @@ class GDCloudLinkMonitor(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'delete_local_on_conflict', 'label': '同名文件冲突时删除本地文件', 'hint': '当目标位置存在同名文件且覆盖模式为never时，删除本地文件以避免死循环'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'delete_local_on_failure', 'label': '转移失败时删除本地文件', 'hint': '当文件转移失败时，删除本地文件以避免重复处理'}}]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
                                 'props': {'cols': 12, 'md': 4},
                                 'content': [{
                                     'component': 'VSelect',
@@ -2147,7 +2201,8 @@ class GDCloudLinkMonitor(_PluginBase):
             "recovery_check_interval": 1800, "mount_path_mapping": "",
             "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
             "ai_provider": "gemini", "ai_rename_enabled": False, "ai_api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-            "ai_model": "gemini-2.0-flash", "ai_timeout": 30, "ai_cache_days": 5
+            "ai_model": "gemini-2.0-flash", "ai_timeout": 30, "ai_cache_days": 5,
+            "delete_local_on_conflict": False, "delete_local_on_failure": False
         }
 
     def get_page(self) -> List[dict]:
