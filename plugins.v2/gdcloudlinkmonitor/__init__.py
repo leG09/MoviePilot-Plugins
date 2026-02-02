@@ -119,6 +119,7 @@ class GDCloudLinkMonitor(_PluginBase):
     _overwrite_mode: Dict[str, Optional[str]] = {}
     _delete_local_on_conflict = False  # 同名文件冲突时删除本地文件
     _delete_local_on_failure = False  # 转移失败时删除本地文件
+    _delete_local_on_unrecognized = False  # 未识别到媒体信息时删除本地文件
     _medias = {}
     # 退出事件
     _event = threading.Event()
@@ -1098,6 +1099,8 @@ class GDCloudLinkMonitor(_PluginBase):
             self._delete_local_on_conflict = config.get("delete_local_on_conflict", False)
             # 转移失败时删除本地文件配置
             self._delete_local_on_failure = config.get("delete_local_on_failure", False)
+            # 未识别到媒体信息时删除本地文件配置
+            self._delete_local_on_unrecognized = config.get("delete_local_on_unrecognized", False)
 
         # 停止现有任务
         self.stop_service()
@@ -1261,6 +1264,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "ai_prompt_template": self._ai_prompt_template,
             "delete_local_on_conflict": self._delete_local_on_conflict,
             "delete_local_on_failure": self._delete_local_on_failure,
+            "delete_local_on_unrecognized": self._delete_local_on_unrecognized,
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -1466,6 +1470,16 @@ class GDCloudLinkMonitor(_PluginBase):
                             title=f"{file_path.name} 未识别到媒体信息，无法入库！\n"
                                   f"回复：```\n/redo {his.id} [tmdbid]|[类型]\n``` 手动识别转移。"
                         )
+                    if self._delete_local_on_unrecognized:
+                        try:
+                            if file_path.exists():
+                                logger.info(f"未识别到媒体信息，删除本地文件：{file_path}")
+                                file_path.unlink()
+                                logger.info(f"已删除本地文件：{file_path}")
+                            else:
+                                logger.warn(f"文件不存在，无法删除：{file_path}")
+                        except Exception as e:
+                            logger.error(f"删除本地文件失败：{e}")
                     return
 
                 # 如果未开启新增已入库媒体是否跟随TMDB信息变化则根据tmdbid查询之前的title
@@ -1969,15 +1983,21 @@ class GDCloudLinkMonitor(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {'component': 'VSwitch', 'props': {'model': 'delete_local_on_conflict', 'label': '同名文件冲突时删除本地文件', 'hint': '当目标位置存在同名文件且覆盖模式为never时，删除本地文件以避免死循环'}}]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {'component': 'VSwitch', 'props': {'model': 'delete_local_on_failure', 'label': '转移失败时删除本地文件', 'hint': '当文件转移失败时，删除本地文件以避免重复处理'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'delete_local_on_unrecognized', 'label': '未识别到媒体时删除本地文件', 'hint': '当无法识别媒体信息时删除本地文件，避免重复处理'}}]
                             }
                         ]
                     },
@@ -2226,7 +2246,8 @@ class GDCloudLinkMonitor(_PluginBase):
             "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
             "ai_provider": "gemini", "ai_rename_enabled": False, "ai_api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
             "ai_model": "gemini-2.0-flash", "ai_timeout": 30, "ai_cache_days": 5,
-            "delete_local_on_conflict": False, "delete_local_on_failure": False
+            "delete_local_on_conflict": False, "delete_local_on_failure": False,
+            "delete_local_on_unrecognized": False
         }
 
     def get_page(self) -> List[dict]:
