@@ -72,6 +72,8 @@ class CloudDriveWebhook(_PluginBase):
         self._stub = None
         self._token = None
         self._token_time = 0
+        self._session_active = False
+        self._session_time = 0
         self._login_lock = threading.Lock()
         
         # 请求合并相关
@@ -368,6 +370,93 @@ class CloudDriveWebhook(_PluginBase):
             self._refresh_thread = threading.Thread(target=self._refresh_worker, daemon=True)
             self._refresh_thread.start()
             logger.info("刷新工作线程已启动")
+
+    def _clear_login_state(self):
+        """清理本地登录状态，强制下次重新登录。"""
+        self._token = None
+        self._token_time = 0
+        self._session_active = False
+        self._session_time = 0
+
+    @staticmethod
+    def _is_not_logged_in_error(error) -> bool:
+        """判断是否为CloudDrive要求重新登录的错误。"""
+        if error is None:
+            return False
+
+        error_text = ""
+        if isinstance(error, grpc.RpcError):
+            try:
+                error_text = f"{error.details()} {str(error)}"
+            except Exception:
+                error_text = str(error)
+        else:
+            error_text = str(error)
+
+        error_text = error_text.lower()
+        return "cloudfs not login" in error_text or "not login" in error_text
+
+    @staticmethod
+    def _is_auth_error(error) -> bool:
+        """判断是否为可通过重新登录恢复的鉴权错误。"""
+        if isinstance(error, grpc.RpcError):
+            try:
+                if error.code() == grpc.StatusCode.UNAUTHENTICATED:
+                    return True
+            except Exception:
+                pass
+        return CloudDriveWebhook._is_not_logged_in_error(error)
+
+    def _build_auth_metadata(self):
+        """构建带Bearer Token的gRPC metadata。"""
+        if not self._token:
+            return []
+        return [('authorization', f'Bearer {self._token}')]
+
+    def _perform_clouddrive_login(self, stub=None, force_recreate=False):
+        """调用CloudDrive Login接口建立服务端登录态。"""
+        if force_recreate or not stub:
+            stub = self._get_grpc_stub(force_recreate=force_recreate)
+        if not stub:
+            return False, "无法创建gRPC连接"
+
+        try:
+            import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+        except ImportError as e:
+            logger.error(f"导入CloudDrive protobuf模块失败: {str(e)}")
+            return False, "未找到CloudDrive protobuf模块"
+
+        login_request = CloudDrive_pb2.UserLoginRequest(
+            userName=self._username,
+            password=self._password,
+            synDataToCloud=True
+        )
+
+        logger.info(f"正在执行CloudDrive Login，用户: {self._username}")
+        response = stub.Login(login_request)
+
+        if response.success:
+            self._session_active = True
+            self._session_time = time.time()
+            logger.info("CloudDrive Login成功")
+            return True, "登录成功"
+
+        error_message = getattr(response, 'errorMessage', 'Unknown error')
+        if "already login" in error_message.lower():
+            self._session_active = True
+            self._session_time = time.time()
+            logger.info("CloudDrive服务端会话已存在")
+            return True, "已经登录"
+
+        logger.error(f"CloudDrive Login失败: {error_message}")
+        return False, error_message
+
+    def _force_relogin(self, reason: str = ""):
+        """清理本地状态后强制重新登录。"""
+        if reason:
+            logger.warning(f"{reason}，准备重新登录CloudDrive")
+        self._clear_login_state()
+        return self._login_to_clouddrive()
 
     def _refresh_worker(self):
         """刷新工作线程"""
@@ -878,21 +967,32 @@ class CloudDriveWebhook(_PluginBase):
                 )
                 
                 logger.info(f"正在获取token，用户: {self._username}")
-                
-                # 调用GetToken API
-                response = stub.GetToken(token_request)
-                
-                logger.info(f"Token响应: success={response.success}")
-                
-                if response.success:
-                    self._token = response.token
-                    self._token_time = current_time
-                    logger.info("CloudDrive token获取成功")
-                    return True, "token获取成功"
-                else:
+
+                def _fetch_token(active_stub):
+                    response = active_stub.GetToken(token_request)
+
+                    logger.info(f"Token响应: success={response.success}")
+
+                    if response.success:
+                        self._token = response.token
+                        self._token_time = time.time()
+                        logger.info("CloudDrive token获取成功")
+                        return True, "token获取成功"
+
                     error_message = getattr(response, 'errorMessage', 'Unknown error')
                     logger.error(f"CloudDrive token获取失败: {error_message}")
                     return False, error_message
+
+                try:
+                    return _fetch_token(stub)
+                except grpc.RpcError as token_error:
+                    if self._is_not_logged_in_error(token_error):
+                        logger.warning("GetToken返回 CloudFS not login，先执行 Login 再重新获取token")
+                        login_success, login_message = self._perform_clouddrive_login(stub=stub)
+                        if not login_success:
+                            return False, login_message
+                        return _fetch_token(stub)
+                    raise token_error
                     
         except grpc.RpcError as e:
             if "Cannot invoke RPC on closed channel" in str(e):
@@ -903,38 +1003,44 @@ class CloudDriveWebhook(_PluginBase):
                     logger.info("gRPC连接重新创建成功，重试登录")
                     # 重新尝试登录（仅一次，避免无限递归）
                     try:
-                        # 导入protobuf消息
-                        import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
-                        
-                        # 创建登录请求
-                        login_request = CloudDrive_pb2.UserLoginRequest(
-                            userName=self._username,
-                            password=self._password,
-                            synDataToCloud=False
-                        )
-                        
-                        # 调用登录API
-                        response = stub.Login(login_request)
-                        
-                        if response.success:
-                            self._session_active = True
-                            self._session_time = time.time()
-                            logger.info("CloudDrive重新登录成功")
-                            return True, "重新登录成功"
-                        else:
-                            error_message = getattr(response, 'errorMessage', 'Unknown error')
-                            if "already login" in error_message.lower():
-                                self._session_active = True
-                                self._session_time = time.time()
-                                return True, "已经登录"
-                            else:
-                                return False, error_message
+                        login_success, login_message = self._perform_clouddrive_login(stub=stub)
+                        if not login_success:
+                            return False, login_message
+                        self._token = None
+                        self._token_time = 0
+                        return self._login_to_clouddrive()
                     except Exception as retry_e:
                         logger.error(f"重试登录失败: {str(retry_e)}")
                         return False, f"重试登录失败: {str(retry_e)}"
                 else:
                     logger.error("重新创建gRPC连接失败")
                     return False, "重新创建gRPC连接失败"
+            elif self._is_not_logged_in_error(e):
+                logger.warning("登录CloudDrive时检测到 CloudFS not login，改为先执行 Login 再获取token")
+                try:
+                    stub = self._get_grpc_stub(force_recreate=True)
+                    login_success, login_message = self._perform_clouddrive_login(stub=stub)
+                    if not login_success:
+                        return False, login_message
+
+                    import clouddrive.CloudDrive_pb2 as CloudDrive_pb2
+                    token_request = CloudDrive_pb2.GetTokenRequest(
+                        userName=self._username,
+                        password=self._password
+                    )
+                    response = stub.GetToken(token_request)
+                    if response.success:
+                        self._token = response.token
+                        self._token_time = time.time()
+                        logger.info("Login后重新获取token成功")
+                        return True, "登录并获取token成功"
+
+                    error_message = getattr(response, 'errorMessage', 'Unknown error')
+                    logger.error(f"Login后重新获取token失败: {error_message}")
+                    return False, error_message
+                except Exception as retry_e:
+                    logger.error(f"登录恢复失败: {str(retry_e)}")
+                    return False, f"登录恢复失败: {str(retry_e)}"
             else:
                 logger.error(f"登录CloudDrive时发生gRPC错误: {str(e)}")
                 return False, str(e)
@@ -942,7 +1048,7 @@ class CloudDriveWebhook(_PluginBase):
             logger.error(f"登录CloudDrive时发生错误: {str(e)}")
             return False, str(e)
 
-    def _refresh_directory_via_grpc(self, directory_path: str) -> Dict[str, Any]:
+    def _refresh_directory_via_grpc(self, directory_path: str, _retried: bool = False) -> Dict[str, Any]:
         """
         通过gRPC刷新指定目录
         
@@ -979,7 +1085,7 @@ class CloudDriveWebhook(_PluginBase):
             logger.info(f"发送gRPC刷新请求: {directory_path}")
             
             # 创建带token的metadata
-            metadata = [('authorization', f'Bearer {self._token}')]
+            metadata = self._build_auth_metadata()
             
             # 调用GetSubFiles API进行刷新
             response_stream = stub.GetSubFiles(refresh_request, metadata=metadata)
@@ -1015,7 +1121,10 @@ class CloudDriveWebhook(_PluginBase):
                                 forceRefresh=True,
                                 checkExpires=True
                             )
-                            response_stream = stub.GetSubFiles(refresh_request)
+                            response_stream = stub.GetSubFiles(
+                                refresh_request,
+                                metadata=self._build_auth_metadata()
+                            )
                             file_count = 0
                             for response in response_stream:
                                 if hasattr(response, 'subFiles'):
@@ -1033,6 +1142,12 @@ class CloudDriveWebhook(_PluginBase):
                         return {"success": False, "message": f"重新登录失败: {login_message}"}
                 else:
                     return {"success": False, "message": "重新创建gRPC连接失败"}
+            elif self._is_auth_error(e) and not _retried:
+                logger.warning(f"刷新目录时检测到登录失效，准备重新登录后重试: {directory_path}")
+                login_success, login_message = self._force_relogin("CloudDrive返回未登录")
+                if not login_success:
+                    return {"success": False, "message": f"重新登录失败: {login_message}"}
+                return self._refresh_directory_via_grpc(directory_path, _retried=True)
             
             error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
             logger.error(error_msg)
@@ -1566,7 +1681,7 @@ class CloudDriveWebhook(_PluginBase):
             logger.error(f"获取目标路径前缀时发生错误: {str(e)}")
             return ""
 
-    def _check_file_exists_via_grpc(self, file_path: str) -> bool:
+    def _check_file_exists_via_grpc(self, file_path: str, _retried: bool = False) -> bool:
         """
         通过gRPC检查文件是否存在
         
@@ -1624,7 +1739,7 @@ class CloudDriveWebhook(_PluginBase):
             logger.info(f"  path: {find_request.path}")
             
             # 创建带token的metadata
-            metadata = [('authorization', f'Bearer {self._token}')]
+            metadata = self._build_auth_metadata()
             logger.info(f"创建metadata: {metadata}")
             
             # 调用FindFileByPath API
@@ -1671,6 +1786,13 @@ class CloudDriveWebhook(_PluginBase):
             if e.code() == grpc.StatusCode.NOT_FOUND:
                 logger.info(f"✓ 文件不存在 (NOT_FOUND): {file_path}")
                 return False
+            elif self._is_auth_error(e) and not _retried:
+                logger.warning(f"检查文件时检测到登录失效，准备重新登录后重试: {file_path}")
+                login_success, login_message = self._force_relogin("CloudDrive返回未登录")
+                if not login_success:
+                    logger.warning(f"重新登录失败，无法检查文件: {login_message}")
+                    return False
+                return self._check_file_exists_via_grpc(file_path, _retried=True)
             elif e.code() == grpc.StatusCode.UNAUTHENTICATED:
                 logger.warning(f"✗ 认证失败 (UNAUTHENTICATED): {e.details()}")
                 return False
@@ -1853,7 +1975,7 @@ class CloudDriveWebhook(_PluginBase):
             "sync_results": sync_results
         }
 
-    def _copy_file_via_grpc(self, source_path: str, target_path: str) -> dict:
+    def _copy_file_via_grpc(self, source_path: str, target_path: str, _retried: bool = False) -> dict:
         """
         通过gRPC复制文件（使用CopyFile RPC）
         
@@ -1901,7 +2023,7 @@ class CloudDriveWebhook(_PluginBase):
             )
             
             # 创建带token的metadata
-            metadata = [('authorization', f'Bearer {self._token}')]
+            metadata = self._build_auth_metadata()
             
             # 调用CopyFile RPC
             logger.info(f"调用CopyFile RPC: {source_path} => {target_dir}")
@@ -1939,6 +2061,13 @@ class CloudDriveWebhook(_PluginBase):
             # 如果已经在内部处理过，这里不会执行（因为上面已经重新抛出）
             # 如果是在调用 CopyFile 之前发生的错误，这里会处理
             if not copy_called:
+                if self._is_auth_error(e) and not _retried:
+                    logger.warning(f"复制文件时检测到登录失效，准备重新登录后重试: {source_path}")
+                    login_success, login_message = self._force_relogin("CloudDrive返回未登录")
+                    if login_success:
+                        return self._copy_file_via_grpc(source_path, target_path, _retried=True)
+                    result = {"success": False, "message": f"重新登录失败: {login_message}"}
+                    return result
                 error_msg = f"gRPC调用失败: {e.code()} - {e.details()}"
                 logger.error(error_msg)
                 result = {"success": False, "message": error_msg}
@@ -1984,7 +2113,7 @@ class CloudDriveWebhook(_PluginBase):
                 return
             
             # 创建带token的metadata
-            metadata = [('authorization', f'Bearer {self._token}')]
+            metadata = self._build_auth_metadata()
             
             # 调用RemoveCompletedCopyTasks RPC
             logger.debug("调用RemoveCompletedCopyTasks RPC删除已完成的复制任务")
@@ -1992,6 +2121,18 @@ class CloudDriveWebhook(_PluginBase):
                 stub.RemoveCompletedCopyTasks(empty_pb2.Empty(), metadata=metadata)
                 logger.debug("已成功删除已完成的复制任务")
             except grpc.RpcError as e:
+                if self._is_auth_error(e):
+                    logger.warning("删除复制任务时检测到登录失效，重新登录后重试一次")
+                    login_success, _ = self._force_relogin("CloudDrive返回未登录")
+                    if login_success:
+                        retry_stub = self._get_grpc_stub(force_recreate=True)
+                        if retry_stub:
+                            retry_stub.RemoveCompletedCopyTasks(
+                                empty_pb2.Empty(),
+                                metadata=self._build_auth_metadata()
+                            )
+                            logger.debug("重新登录后已成功删除已完成的复制任务")
+                            return
                 logger.warning(f"删除已完成的复制任务时发生gRPC错误: {e.code()} - {e.details()}")
             except Exception as e:
                 logger.warning(f"删除已完成的复制任务时发生错误: {str(e)}")
@@ -1999,7 +2140,7 @@ class CloudDriveWebhook(_PluginBase):
         except Exception as e:
             logger.warning(f"删除已完成的复制任务时发生异常: {str(e)}")
 
-    def _ensure_directory_exists(self, directory_path: str) -> bool:
+    def _ensure_directory_exists(self, directory_path: str, _retried: bool = False) -> bool:
         """
         确保目录存在，如果不存在则创建
         
@@ -2033,7 +2174,7 @@ class CloudDriveWebhook(_PluginBase):
             current_path = ""
             
             # 创建带token的metadata
-            metadata = [('authorization', f'Bearer {self._token}')]
+            metadata = self._build_auth_metadata()
             
             for i, part in enumerate(path_parts):
                 if part == "/":
@@ -2054,7 +2195,14 @@ class CloudDriveWebhook(_PluginBase):
                     if response and response.fullPathName:
                         logger.debug(f"目录已存在: {current_path}")
                         continue
-                except grpc.RpcError:
+                except grpc.RpcError as e:
+                    if self._is_auth_error(e) and not _retried:
+                        logger.warning(f"创建目录时检测到登录失效，准备重新登录后重试: {directory_path}")
+                        login_success, login_message = self._force_relogin("CloudDrive返回未登录")
+                        if not login_success:
+                            logger.error(f"重新登录失败: {login_message}")
+                            return False
+                        return self._ensure_directory_exists(directory_path, _retried=True)
                     # 目录不存在，需要创建
                     pass
                 
