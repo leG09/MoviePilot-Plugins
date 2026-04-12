@@ -15,7 +15,7 @@ class TransferWebhook(_PluginBase):
     # 插件图标
     plugin_icon = "webhook.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -246,10 +246,13 @@ class TransferWebhook(_PluginBase):
         if self._webhook_token:
             headers["X-Webhook-Token"] = self._webhook_token
 
+        payload = {"path": mapped_path}
+        logger.info(f"转移完成Webhook发送JSON：{payload}")
+
         try:
             ret = RequestUtils(headers=headers, timeout=self._timeout).post_res(
                 self._webhook_url,
-                json={"path": mapped_path}
+                json=payload
             )
             if ret:
                 logger.info(f"转移完成Webhook发送成功：{mapped_path} -> {self._webhook_url}")
