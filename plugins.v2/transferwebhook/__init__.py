@@ -11,11 +11,11 @@ class TransferWebhook(_PluginBase):
     # 插件名称
     plugin_name = "转移完成Webhook"
     # 插件描述
-    plugin_desc = "文件转移成功后立即向指定Webhook推送目标路径。"
+    plugin_desc = "文件转移成功后立即向指定Webhook推送目标路径，支持路径包含过滤。"
     # 插件图标
     plugin_icon = "webhook.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -32,6 +32,7 @@ class TransferWebhook(_PluginBase):
     _webhook_url = ""
     _webhook_token = ""
     _path_mappings = ""
+    _include_paths = ""
     _timeout = 20
 
     def init_plugin(self, config: dict = None):
@@ -40,6 +41,7 @@ class TransferWebhook(_PluginBase):
             self._webhook_url = (config.get("webhook_url") or "").strip()
             self._webhook_token = (config.get("webhook_token") or "").strip()
             self._path_mappings = config.get("path_mappings") or ""
+            self._include_paths = config.get("include_paths") or ""
             self._timeout = self._to_int(config.get("timeout"), 20)
 
     def get_state(self) -> bool:
@@ -75,6 +77,28 @@ class TransferWebhook(_PluginBase):
                                         "props": {
                                             "model": "enabled",
                                             "label": "启用插件"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "include_paths",
+                                            "label": "包含路径过滤",
+                                            "rows": 3,
+                                            "placeholder": "/国漫\n# 每行一个包含关键字；留空表示全部发送"
                                         }
                                     }
                                 ]
@@ -177,7 +201,7 @@ class TransferWebhook(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "文件转移成功后发送 POST JSON：{\"path\": \"映射后的目标路径\"}。路径映射格式为 源前缀=>目标前缀；目标前缀为空表示去掉源前缀，例如 /gd1=> 会把 /gd1/国漫/a.mp4 转为 /国漫/a.mp4。"
+                                            "text": "文件转移成功后发送 POST JSON：{\"path\": \"映射后的目标路径\"}。路径映射格式为 源前缀=>目标前缀；目标前缀为空表示去掉源前缀，例如 /gd1=> 会把 /gd1/国漫/a.mp4 转为 /国漫/a.mp4。包含路径过滤可配置 /国漫，只有原始路径或映射后路径包含该内容才发送。"
                                         }
                                     }
                                 ]
@@ -191,6 +215,7 @@ class TransferWebhook(_PluginBase):
             "webhook_url": "",
             "webhook_token": "",
             "path_mappings": "/gd1=>",
+            "include_paths": "",
             "timeout": 20
         }
 
@@ -211,6 +236,10 @@ class TransferWebhook(_PluginBase):
             return
 
         mapped_path = self.__map_path(path)
+        if not self.__match_include_paths(path, mapped_path):
+            logger.info(f"转移完成Webhook路径未命中包含过滤，跳过发送：{path}")
+            return
+
         headers = {
             "Content-Type": "application/json"
         }
@@ -298,6 +327,27 @@ class TransferWebhook(_PluginBase):
                 continue
             mappings.append((source, target))
         return mappings
+
+    def __match_include_paths(self, original_path: str, mapped_path: str) -> bool:
+        include_paths = self.__parse_include_paths()
+        if not include_paths:
+            return True
+
+        original_path = self.__normalize_path(original_path)
+        mapped_path = self.__normalize_path(mapped_path)
+        for include_path in include_paths:
+            if include_path in original_path or include_path in mapped_path:
+                return True
+        return False
+
+    def __parse_include_paths(self) -> List[str]:
+        include_paths = []
+        for line in (self._include_paths or "").replace(",", "\n").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            include_paths.append(self.__normalize_path(line))
+        return include_paths
 
     @staticmethod
     def __normalize_path(path: str) -> str:
