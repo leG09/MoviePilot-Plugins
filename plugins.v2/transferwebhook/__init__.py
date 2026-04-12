@@ -13,13 +13,13 @@ class TransferWebhook(_PluginBase):
     # 插件描述
     plugin_desc = "文件转移成功后立即向指定Webhook推送目标路径。"
     # 插件图标
-    plugin_icon = "clouddrive.png"
+    plugin_icon = "webhook.png"
     # 插件版本
     plugin_version = "1.0"
     # 插件作者
-    plugin_author = "chris"
+    plugin_author = "leGO9"
     # 作者主页
-    author_url = ""
+    author_url = "https://github.com/leG09"
     # 插件配置项ID前缀
     plugin_config_prefix = "transferwebhook_"
     # 加载顺序

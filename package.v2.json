@@ -80,9 +80,8 @@
     "labels": "Webhook,转移,云盘",
     "version": "1.0",
     "icon": "clouddrive.png",
-    "author": "chris",
+    "author": "leGO9",
     "level": 1,
-    "compatible": true,
     "history": {
       "v1.0": "首个版本，支持转移完成后推送目标路径、Token鉴权和路径映射"
     }
