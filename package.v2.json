@@ -74,6 +74,19 @@
       "v2.0": "纯Python gRPC版本：移除CLI依赖，直接使用gRPC通信"
     }
   },
+  "TransferWebhook": {
+    "name": "转移完成Webhook",
+    "description": "文件转移成功后立即向指定Webhook推送转移后的目标路径，支持Token鉴权和路径前缀映射。",
+    "labels": "Webhook,转移,云盘",
+    "version": "1.0",
+    "icon": "clouddrive.png",
+    "author": "chris",
+    "level": 1,
+    "compatible": true,
+    "history": {
+      "v1.0": "首个版本，支持转移完成后推送目标路径、Token鉴权和路径映射"
+    }
+  },
   "DownloaderBalancer": {
     "name": "下载器负载均衡",
     "description": "下载器负载均衡插件，支持轮询、Hash、电影规则分类等多种选择策略",
