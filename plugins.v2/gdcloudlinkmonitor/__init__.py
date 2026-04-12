@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.3" 
+    plugin_version = "3.1.4"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -1751,13 +1751,12 @@ class GDCloudLinkMonitor(_PluginBase):
                         }
                     self._medias[mediainfo.title_year + " " + file_meta.season] = media_list
 
-                if self._refresh:
-                    # 广播事件
-                    self.eventmanager.send_event(EventType.TransferComplete, {
-                        'meta': file_meta,
-                        'mediainfo': mediainfo,
-                        'transferinfo': transferinfo
-                    })
+                # 广播转移完成事件，供Webhook等插件订阅；不再受“刷新媒体库”开关影响。
+                self.eventmanager.send_event(EventType.TransferComplete, {
+                    'meta': file_meta,
+                    'mediainfo': mediainfo,
+                    'transferinfo': transferinfo
+                })
 
                 if self._softlink:
                     # 通知实时软连接生成
