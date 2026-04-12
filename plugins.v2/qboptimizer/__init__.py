@@ -30,11 +30,11 @@ class QbOptimizer(_PluginBase):
     # 插件名称
     plugin_name = "QB种子优化"
     # 插件描述
-    plugin_desc = "优化qBittorrent种子管理：清理进行中无人做种任务、清理预计下载时长超过N小时且已下载N小时的慢速任务、智能综合评分优先级（下载速度+做种数+进度）、下载阈值控制（当下载中种子总大小超过阈值时暂停慢速种子，确保磁盘空间不超阈值）"
+    plugin_desc = "优化qBittorrent种子管理：清理进行中无人做种任务、清理预计下载时长超过N小时且已下载N小时的慢速任务、智能综合评分优先级（下载速度+做种数+进度）、下载阈值控制（当下载中种子总大小超过阈值时优先暂停低速低进度种子，确保磁盘空间不超阈值）"
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.8"
+    plugin_version = "1.9"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -1936,7 +1936,7 @@ class QbOptimizer(_PluginBase):
         """
         下载阈值控制管理：如果当前下载中的种子总大小超过阈值，直接暂停任务保持不超过阈值
         1. 计算所有下载中种子的总大小（只计算需要下载的文件，优先级不为0）
-        2. 如果总大小超过阈值，按下载速度从慢到快暂停种子，直到总大小不超过阈值
+        2. 如果总大小超过阈值，优先暂停当前下载速度慢、下载进度低的种子，直到总大小不超过阈值
         3. 如果总大小未超过阈值，按下载速度从快到慢恢复暂停的种子，但不能超过阈值
         """
         logger.info(f"【功能5-下载阈值控制】开始下载阈值控制管理，功能开关: {self._enable_download_threshold}")
@@ -2094,13 +2094,16 @@ class QbOptimizer(_PluginBase):
                     
                     if torrent_remaining_size > 0:
                         dlspeed = getattr(torrent, 'dlspeed', 0)
+                        progress = getattr(torrent, 'progress', 0)
                         downloading_torrent_info.append({
                             'torrent': torrent,
                             'torrent_hash': torrent_hash,
                             'torrent_name': torrent_name,
                             'remaining_size': torrent_remaining_size,
                             'dlspeed': dlspeed,
-                            'dlspeed_mbps': dlspeed / (1024 * 1024)  # 转换为MB/s
+                            'dlspeed_mbps': dlspeed / (1024 * 1024),  # 转换为MB/s
+                            'progress': progress,
+                            'progress_percent': progress * 100
                         })
                     
                 except Exception as e:
@@ -2142,8 +2145,11 @@ class QbOptimizer(_PluginBase):
                 
                 logger.warning(f"【功能5-下载阈值控制】预计剩余空间({estimated_free_space:.2f}GB) < 最小阈值({self._min_disk_space_threshold}GB)，开始暂停种子")
                 
-                # 按下载速度从慢到快排序（慢的先暂停）
-                downloading_torrent_info.sort(key=lambda x: x['dlspeed_mbps'])
+                # 保留优先级：当前下载速度高的优先不暂停；速度相同时，下载进度高的优先不暂停。
+                # 因此暂停顺序为：速度低 -> 进度低 -> 剩余空间大。
+                downloading_torrent_info.sort(
+                    key=lambda x: (x['dlspeed_mbps'], x['progress'], -x['remaining_size'])
+                )
                 
                 # 计算需要暂停的总大小
                 space_shortage_gb = self._min_disk_space_threshold - estimated_free_space
@@ -2164,13 +2170,14 @@ class QbOptimizer(_PluginBase):
                     torrent_name = torrent_info['torrent_name']
                     remaining_size = torrent_info['remaining_size']
                     dlspeed_mbps = torrent_info['dlspeed_mbps']
+                    progress_percent = torrent_info['progress_percent']
                     
                     try:
                         # 暂停种子
                         result = downloader_obj.stop_torrents(ids=[torrent_hash])
                         
                         if result:
-                            logger.info(f"【功能5-下载阈值控制】暂停种子成功: {torrent_name} (速度: {dlspeed_mbps:.2f}MB/s, 剩余: {StringUtils.str_filesize(remaining_size)})")
+                            logger.info(f"【功能5-下载阈值控制】暂停种子成功: {torrent_name} (速度: {dlspeed_mbps:.2f}MB/s, 进度: {progress_percent:.1f}%, 剩余: {StringUtils.str_filesize(remaining_size)})")
                             paused_count += 1
                             paused_size += remaining_size
                         else:
@@ -2189,7 +2196,7 @@ class QbOptimizer(_PluginBase):
                     notification_text += f"预计剩余空间: {estimated_free_space:.2f}GB\n"
                     notification_text += f"最小阈值: {self._min_disk_space_threshold}GB\n"
                     notification_text += f"空间不足: {space_shortage_gb:.2f}GB\n"
-                    notification_text += f"\n已暂停 {paused_count} 个下载速度慢的种子，释放空间: {StringUtils.str_filesize(paused_size)}\n"
+                    notification_text += f"\n已暂停 {paused_count} 个低速低进度的种子，释放空间: {StringUtils.str_filesize(paused_size)}\n"
                     notification_text += f"确保磁盘空间不会超过阈值"
                     
                     self.post_message(
@@ -3491,7 +3498,7 @@ class QbOptimizer(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '📊 下载阈值控制：当下载中种子总大小超过阈值时，自动暂停下载速度慢的种子，确保磁盘空间不超阈值。当空间充足时，按下载速度从快到慢恢复暂停的种子，但不能超过阈值。只处理需要下载的文件（优先级不为0），跳过不下载的文件（优先级为0）'
+                                            'text': '📊 下载阈值控制：当下载中种子总大小超过阈值时，优先保留当前下载速度高的种子；速度相同时，优先保留下载进度高的种子，暂停低速低进度种子以确保磁盘空间不超阈值。当空间充足时，按下载速度从快到慢恢复暂停的种子，但不能超过阈值。只处理需要下载的文件（优先级不为0），跳过不下载的文件（优先级为0）'
                                         }
                                     }
                                 ]

@@ -255,9 +255,11 @@ class TransferWebhook(_PluginBase):
                 json=payload
             )
             if ret:
+                logger.info(f"转移完成Webhook返回数据：状态码={ret.status_code}，响应={ret.text}，原因={ret.reason}")
                 logger.info(f"转移完成Webhook发送成功：{mapped_path} -> {self._webhook_url}")
             elif ret is not None:
-                logger.error(f"转移完成Webhook发送失败，状态码：{ret.status_code}，返回信息：{ret.text} {ret.reason}")
+                logger.error(f"转移完成Webhook返回数据：状态码={ret.status_code}，响应={ret.text}，原因={ret.reason}")
+                logger.error(f"转移完成Webhook发送失败：{mapped_path} -> {self._webhook_url}")
             else:
                 logger.error(f"转移完成Webhook发送失败，未获取到返回信息：{mapped_path}")
         except Exception as e:
