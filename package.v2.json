@@ -124,6 +124,18 @@
       "v1.0": "首个版本，实现文件清理功能"
     }
   },
+  "DownloadResidueCleaner": {
+    "name": "下载残留目录清理",
+    "description": "清理下载目录中转移后留下的空目录、压缩分卷、NFO、SFV、截图等残留目录，自动跳过媒体文件和 .!qB 未完成文件。",
+    "labels": "清理,下载目录,MoviePilot",
+    "version": "1.0.0",
+    "icon": "refresh2.png",
+    "author": "leGO9",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本，支持清理空目录和只包含附属残留文件的目录"
+    }
+  },
   "RssPlugin": {
     "name": "RSS订阅",
     "description": "定时刷新RSS报文，识别内容后添加订阅或直接下载。",
