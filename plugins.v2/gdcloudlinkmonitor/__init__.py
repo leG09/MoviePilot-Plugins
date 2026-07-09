@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.5"
+    plugin_version = "3.1.6"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -142,6 +142,19 @@ class GDCloudLinkMonitor(_PluginBase):
     
     # 本地父目录识别开关：文件名识别失败后，使用直接父目录名再次识别
     _parent_dir_recognition_enabled = False
+
+    @staticmethod
+    def _is_non_retryable_transfer_failure(message: str) -> bool:
+        """
+        这类失败由文件名本身缺少可用信息导致，重复处理不会改变结果。
+        """
+        if not message:
+            return False
+        return any(keyword in message for keyword in [
+            "未识别到文件集数",
+            "未识别文件集数",
+            "无法识别文件集数"
+        ])
 
     @staticmethod
     def _build_parent_dir_meta(file_path: Path, mon_path: str) -> Optional[MetaInfoPath]:
@@ -1022,6 +1035,14 @@ class GDCloudLinkMonitor(_PluginBase):
                         logger.info(f"文件已成功转移过，待媒体识别成功后删除成功转移记录并继续处理：{event_path}")
                     else:
                         existing_failed_transfer_history = True
+                        failure_message = (
+                            getattr(transfer_history, "errmsg", None)
+                            or getattr(transfer_history, "message", None)
+                            or ""
+                        )
+                        if self._is_non_retryable_transfer_failure(failure_message):
+                            logger.info(f"文件转移失败过且失败原因无需重试，保留失败记录并跳过处理：{event_path}，原因：{failure_message}")
+                            return
                         logger.info(f"文件转移失败过，保留失败记录并继续处理：{event_path}")
                     
                     # 保留记录状态，继续根据当前文件重新识别和处理。
