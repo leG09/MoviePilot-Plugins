@@ -30,7 +30,7 @@ class EmbyEpisodeSync(_PluginBase):
     plugin_desc = "定时更新Emby已存在的集数到订阅已下载中，避免已下载中存在但Emby不存在导致缺集"
     plugin_icon = "Emby_A.png"
     plugin_color = "#52C41A"
-    plugin_version = "2.2"
+    plugin_version = "2.3"
     plugin_author = "leGO9"
     author_url = "https://github.com/leG09"
     plugin_config_prefix = "embyepisodesync"
@@ -547,6 +547,11 @@ class EmbyEpisodeSync(_PluginBase):
                         logger.warning(f"订阅 {subscribe.name} S{subscribe.season:02d} 在Emby中未找到 (TMDB ID: {subscribe.tmdbid})")
                         skipped_count += 1
                         continue
+
+                    emby_season_episodes = {
+                        int(season) if isinstance(season, str) and season.isdigit() else season: episodes
+                        for season, episodes in emby_season_episodes.items()
+                    }
                     
                     # 获取对应季的集数列表
                     emby_episodes = emby_season_episodes.get(subscribe.season, [])
@@ -812,9 +817,14 @@ class EmbyEpisodeSync(_PluginBase):
                             seasons_with_episodes = {}
                             for season, episodes in emby_season_episodes.items():
                                 if episodes:
+                                    try:
+                                        season_number = int(season)
+                                    except (TypeError, ValueError):
+                                        logger.debug(f"剧集 {name} (TMDB: {tmdb_id}) 季号无效: {season}")
+                                        continue
                                     # 确保集数都是整数类型
                                     int_episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in episodes]
-                                    seasons_with_episodes[season] = int_episodes
+                                    seasons_with_episodes[season_number] = int_episodes
                             
                             if not seasons_with_episodes:
                                 logger.debug(f"剧集 {name} (TMDB: {tmdb_id}) 没有有集数的季")
@@ -868,6 +878,104 @@ class EmbyEpisodeSync(_PluginBase):
             logger.error(f"获取Emby所有剧集时发生错误: {str(e)}")
         
         return emby_series
+
+    @staticmethod
+    def _get_mediainfo_season_numbers(mediainfo) -> List[int]:
+        """
+        从媒体信息中获取正片季号列表，跳过特别篇等非正季。
+        """
+        seasons = []
+        if not mediainfo or not mediainfo.seasons:
+            return seasons
+
+        for season in mediainfo.seasons.keys():
+            try:
+                season_number = int(season)
+            except (TypeError, ValueError):
+                continue
+            if season_number > 0:
+                seasons.append(season_number)
+
+        return sorted(set(seasons))
+
+    @staticmethod
+    def _get_mediainfo_total_episode_count(mediainfo, season: int) -> int:
+        """
+        获取指定季的总集数，兼容 season key 为 int 或 str 的情况。
+        """
+        if not mediainfo or not mediainfo.seasons:
+            return 0
+
+        total_episodes = mediainfo.seasons.get(season)
+        if total_episodes is None:
+            total_episodes = mediainfo.seasons.get(str(season))
+
+        return len(total_episodes) if total_episodes else 0
+
+    @staticmethod
+    def _normalize_episode_list(episodes: List) -> List[int]:
+        """
+        将集数列表转换为去重、排序后的整数列表。
+        """
+        if not episodes:
+            return []
+
+        normalized_episodes = []
+        for episode in episodes:
+            try:
+                normalized_episodes.append(int(episode))
+            except (TypeError, ValueError):
+                continue
+
+        return sorted(set(normalized_episodes))
+
+    def _create_missing_subscribe(self, subscribe_oper: SubscribeOper, mediainfo,
+                                  tmdb_id: int, season: int, episodes: List,
+                                  username: str = "EmbyEpisodeSync") -> Optional[Dict[str, Any]]:
+        """
+        根据 Emby 已有集数创建单季订阅；如果该季已全集则跳过。
+        """
+        episodes_list = self._normalize_episode_list(episodes)
+        total_episode_count = self._get_mediainfo_total_episode_count(mediainfo, season)
+
+        if total_episode_count == 0:
+            logger.warning(f"无法获取 {mediainfo.title_year} S{season:02d} 的总集数，默认创建订阅")
+        elif len(episodes_list) >= int(total_episode_count):
+            logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
+            return None
+
+        logger.info(f"创建缺失订阅: {mediainfo.title_year} S{season:02d} (TMDB: {tmdb_id})")
+        logger.info(f"  Emby中的集数: {episodes_list} ({len(episodes_list)}/{total_episode_count if total_episode_count > 0 else '未知'})")
+
+        subscribe_id, message = subscribe_oper.add(
+            mediainfo=mediainfo,
+            season=season,
+            note=episodes_list,
+            state='N',
+            username=username
+        )
+
+        try:
+            total_episode_for_save = int(total_episode_count) if total_episode_count else 0
+            if total_episode_for_save < len(episodes_list):
+                total_episode_for_save = len(episodes_list)
+            lack_episode_for_save = max(total_episode_for_save - len(episodes_list), 0)
+            subscribe_oper.update(subscribe_id, {
+                "total_episode": total_episode_for_save,
+                "lack_episode": lack_episode_for_save,
+                "note": episodes_list
+            })
+        except Exception:
+            pass
+
+        logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
+
+        return {
+            "name": mediainfo.title,
+            "season": season,
+            "tmdb_id": tmdb_id,
+            "episodes": episodes_list
+        }
     
     def _check_and_create_missing_subscribes(self, emby, subscribe_oper: SubscribeOper, 
                                             tv_subscribes: List, test_mode: bool = False, 
@@ -928,108 +1036,19 @@ class EmbyEpisodeSync(_PluginBase):
             
             # 部分缺失的剧集（Emby有但MoviePilot缺少某些季）
             partial_missing_series = emby_tmdb_ids & mp_tmdb_ids
-            
-            # 处理完全缺失的剧集
-            for tmdb_id in missing_series:
-                try:
-                    emby_info = emby_series[tmdb_id]
-                    seasons = emby_info["seasons"]
-                    
-                    logger.info(f"发现完全缺失的剧集: {emby_info['name']} (TMDB: {tmdb_id})，有 {len(seasons)} 个季")
-                    
-                    # 通过TMDB ID识别媒体信息
-                    mediainfo = self._media_chain.recognize_media(
-                        mtype=MediaType.TV,
-                        tmdbid=tmdb_id
-                    )
-                    
-                    if not mediainfo:
-                        logger.warning(f"无法通过TMDB ID {tmdb_id} 识别媒体信息: {emby_info['name']}")
-                        continue
-                    
-                    # 为每个季检查是否有缺集
-                    for season, episodes in seasons.items():
-                        try:
-                            # 确保集数都是整数类型
-                            episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in episodes]
-                            episodes_list = sorted(list(set(episodes)))
-                            
-                            # 获取该季的总集数
-                            total_episodes = mediainfo.seasons.get(season) if mediainfo.seasons else None
-                            total_episode_count = len(total_episodes) if total_episodes else 0
-                            
-                            # 如果无法获取总集数，默认创建订阅（保守策略）
-                            if total_episode_count == 0:
-                                logger.warning(f"无法获取 {mediainfo.title_year} S{season:02d} 的总集数，默认创建订阅")
-                                should_create = True
-                            else:
-                                # 检查是否有缺集：如果Emby中的集数等于总集数，说明已经下载完了，不需要创建订阅
-                                should_create = len(episodes_list) < int(total_episode_count)
-                                
-                                if not should_create:
-                                    logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
-                                    continue
-                            
-                            logger.info(f"创建缺失订阅: {mediainfo.title_year} S{season:02d} (TMDB: {tmdb_id})")
-                            logger.info(f"  Emby中的集数: {episodes_list} ({len(episodes_list)}/{total_episode_count if total_episode_count > 0 else '未知'})")
-                            
-                            # 创建订阅
-                            subscribe_id, message = subscribe_oper.add(
-                                mediainfo=mediainfo,
-                                season=season,
-                                note=episodes_list,
-                                state='N',
-                                username="EmbyEpisodeSync"
-                            )
-                            
-                            # 校正总集数与缺失集，避免显示负数
-                            try:
-                                total_episode_for_save = int(total_episode_count) if total_episode_count else 0
-                                if total_episode_for_save < len(episodes_list):
-                                    total_episode_for_save = len(episodes_list)
-                                lack_episode_for_save = max(total_episode_for_save - len(episodes_list), 0)
-                                subscribe_oper.update(subscribe_id, {
-                                    "total_episode": total_episode_for_save,
-                                    "lack_episode": lack_episode_for_save,
-                                    "note": episodes_list
-                                })
-                            except Exception:
-                                pass
-                            
-                            logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
-                            
-                            created_count += 1
-                            created_subscribes.append({
-                                "name": mediainfo.title,
-                                "season": season,
-                                "tmdb_id": tmdb_id,
-                                "episodes": episodes_list
-                            })
-                            
-                        except Exception as e:
-                            error_msg = f"创建订阅 {mediainfo.title_year} S{season:02d} 时发生错误: {str(e)}"
-                            logger.error(error_msg)
-                            continue
-                            
-                except Exception as e:
-                    error_msg = f"处理完全缺失的剧集 {tmdb_id} 时发生错误: {str(e)}"
-                    logger.error(error_msg)
-                    continue
-            
-            # 处理部分缺失的剧集（某些季缺失）
-            for tmdb_id in partial_missing_series:
+
+            # 以TMDB媒体信息中的全部正片季为准，Emby已有集数只用于判断某季是否全集。
+            # 例如 Emby 只有 S06 且 S06 已全集时，也会检查并创建 S01-S05/S07 的缺失订阅。
+            for tmdb_id in sorted(emby_tmdb_ids):
                 try:
                     emby_info = emby_series[tmdb_id]
                     emby_seasons = set(emby_info["seasons"].keys())
-                    mp_seasons = set(mp_subscribes_dict[tmdb_id].keys())
-                    
-                    # 找出缺失的季
-                    missing_seasons = emby_seasons - mp_seasons
-                    
-                    if not missing_seasons:
-                        continue
-                    
-                    logger.info(f"剧集 {emby_info['name']} (TMDB: {tmdb_id}) 发现缺失的季: {sorted(missing_seasons)}")
+                    mp_seasons = set(mp_subscribes_dict.get(tmdb_id, {}).keys())
+
+                    if tmdb_id in missing_series:
+                        logger.info(f"发现完全缺失的剧集: {emby_info['name']} (TMDB: {tmdb_id})")
+                    elif tmdb_id in partial_missing_series:
+                        logger.debug(f"检查部分订阅剧集: {emby_info['name']} (TMDB: {tmdb_id})")
                     
                     # 通过TMDB ID识别媒体信息
                     mediainfo = self._media_chain.recognize_media(
@@ -1040,76 +1059,47 @@ class EmbyEpisodeSync(_PluginBase):
                     if not mediainfo:
                         logger.warning(f"无法通过TMDB ID {tmdb_id} 识别媒体信息: {emby_info['name']}")
                         continue
-                    
-                    # 为每个缺失的季检查是否有缺集
-                    for season in missing_seasons:
+
+                    all_seasons = set(self._get_mediainfo_season_numbers(mediainfo))
+                    if not all_seasons:
+                        all_seasons = set(emby_seasons)
+                        logger.warning(f"无法获取 {mediainfo.title_year} 的完整季信息，回退使用Emby已有季: {sorted(all_seasons)}")
+
+                    # 找出缺失的季：MoviePilot未订阅的全部正片季，而不是仅限Emby已有季。
+                    missing_seasons = all_seasons - mp_seasons
+
+                    if not missing_seasons:
+                        continue
+
+                    logger.info(
+                        f"剧集 {emby_info['name']} (TMDB: {tmdb_id}) "
+                        f"全集季: {sorted(all_seasons)}，Emby已有季: {sorted(emby_seasons)}，"
+                        f"MoviePilot已订阅季: {sorted(mp_seasons)}，待检查缺失季: {sorted(missing_seasons)}"
+                    )
+
+                    for season in sorted(missing_seasons):
                         try:
                             episodes = emby_info["seasons"].get(season, [])
-                            if not episodes:
-                                continue
-                            
-                            # 确保集数都是整数类型
-                            episodes = [int(ep) if isinstance(ep, str) else int(ep) for ep in episodes]
-                            episodes_list = sorted(list(set(episodes)))
-                            
-                            # 获取该季的总集数
-                            total_episodes = mediainfo.seasons.get(season) if mediainfo.seasons else None
-                            total_episode_count = len(total_episodes) if total_episodes else 0
-                            
-                            # 如果无法获取总集数，默认创建订阅（保守策略）
-                            if total_episode_count == 0:
-                                logger.warning(f"无法获取 {mediainfo.title_year} S{season:02d} 的总集数，默认创建订阅")
-                                should_create = True
-                            else:
-                                # 检查是否有缺集：如果Emby中的集数等于总集数，说明已经下载完了，不需要创建订阅
-                                should_create = len(episodes_list) < int(total_episode_count)
-                                
-                                if not should_create:
-                                    logger.info(f"剧集 {mediainfo.title_year} S{season:02d} 所有集数已下载完成 ({len(episodes_list)}/{total_episode_count})，跳过创建订阅")
-                                    continue
-                            
-                            logger.info(f"创建缺失订阅: {mediainfo.title_year} S{season:02d} (TMDB: {tmdb_id})")
-                            logger.info(f"  Emby中的集数: {episodes_list} ({len(episodes_list)}/{total_episode_count if total_episode_count > 0 else '未知'})")
-                            
-                            # 创建订阅
-                            subscribe_id, message = subscribe_oper.add(
+                            created_subscribe = self._create_missing_subscribe(
+                                subscribe_oper=subscribe_oper,
                                 mediainfo=mediainfo,
+                                tmdb_id=tmdb_id,
                                 season=season,
-                                note=episodes_list,
-                                state='N'
+                                episodes=episodes
                             )
-                            
-                            # 校正总集数与缺失集，避免显示负数
-                            try:
-                                total_episode_for_save = int(total_episode_count) if total_episode_count else 0
-                                if total_episode_for_save < len(episodes_list):
-                                    total_episode_for_save = len(episodes_list)
-                                lack_episode_for_save = max(total_episode_for_save - len(episodes_list), 0)
-                                subscribe_oper.update(subscribe_id, {
-                                    "total_episode": total_episode_for_save,
-                                    "lack_episode": lack_episode_for_save,
-                                    "note": episodes_list
-                                })
-                            except Exception:
-                                pass
-                            
-                            logger.info(f"订阅创建成功: {mediainfo.title_year} S{season:02d} - {message}")
-                            
+                            if not created_subscribe:
+                                continue
+
                             created_count += 1
-                            created_subscribes.append({
-                                "name": mediainfo.title,
-                                "season": season,
-                                "tmdb_id": tmdb_id,
-                                "episodes": episodes_list
-                            })
-                            
+                            created_subscribes.append(created_subscribe)
+
                         except Exception as e:
                             error_msg = f"创建订阅 {mediainfo.title_year} S{season:02d} 时发生错误: {str(e)}"
                             logger.error(error_msg)
                             continue
                             
                 except Exception as e:
-                    error_msg = f"处理部分缺失的剧集 {tmdb_id} 时发生错误: {str(e)}"
+                    error_msg = f"处理缺失订阅剧集 {tmdb_id} 时发生错误: {str(e)}"
                     logger.error(error_msg)
                     continue
             
@@ -1200,4 +1190,3 @@ class EmbyEpisodeSync(_PluginBase):
             
         except Exception as e:
             logger.error(f"发送同步通知时发生错误: {str(e)}")
-

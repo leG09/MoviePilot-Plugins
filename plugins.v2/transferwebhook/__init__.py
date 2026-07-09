@@ -1,3 +1,5 @@
+import json
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.event import eventmanager
@@ -11,11 +13,11 @@ class TransferWebhook(_PluginBase):
     # 插件名称
     plugin_name = "转移完成Webhook"
     # 插件描述
-    plugin_desc = "文件转移成功后立即向指定Webhook推送目标路径，支持路径包含过滤。"
+    plugin_desc = "文件转移成功后向指定Webhook推送目标路径，支持路径包含过滤和业务失败重试。"
     # 插件图标
     plugin_icon = "webhook.png"
     # 插件版本
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -34,6 +36,8 @@ class TransferWebhook(_PluginBase):
     _path_mappings = ""
     _include_paths = ""
     _timeout = 20
+    _retry_count = 5
+    _retry_interval = 10
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -43,6 +47,8 @@ class TransferWebhook(_PluginBase):
             self._path_mappings = config.get("path_mappings") or ""
             self._include_paths = config.get("include_paths") or ""
             self._timeout = self._to_int(config.get("timeout"), 20)
+            self._retry_count = self._to_int(config.get("retry_count"), 5, allow_zero=True)
+            self._retry_interval = self._to_int(config.get("retry_interval"), 10)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -162,6 +168,40 @@ class TransferWebhook(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12,
+                                    "md": 4
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "retry_count",
+                                            "label": "业务失败重试次数",
+                                            "type": "number"
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12,
+                                    "md": 4
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "retry_interval",
+                                            "label": "重试间隔（秒）",
+                                            "type": "number"
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -201,7 +241,7 @@ class TransferWebhook(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "文件转移成功后发送 POST JSON：{\"path\": \"映射后的目标路径\"}。路径映射格式为 源前缀=>目标前缀；目标前缀为空表示去掉源前缀，例如 /gd1=> 会把 /gd1/国漫/a.mp4 转为 /国漫/a.mp4。包含路径过滤可配置 /国漫，只有原始路径或映射后路径包含该内容才发送。"
+                                            "text": "文件转移成功后发送 POST JSON：{\"path\": \"映射后的目标路径\"}。路径映射格式为 源前缀=>目标前缀；目标前缀为空表示去掉源前缀，例如 /gd1=> 会把 /gd1/国漫/a.mp4 转为 /国漫/a.mp4。包含路径过滤可配置 /国漫，只有原始路径或映射后路径包含该内容才发送。目标服务返回 scrapeStatus=NOT_FOUND 或未找到文件时会按配置延迟重试。"
                                         }
                                     }
                                 ]
@@ -216,7 +256,9 @@ class TransferWebhook(_PluginBase):
             "webhook_token": "",
             "path_mappings": "/gd1=>",
             "include_paths": "",
-            "timeout": 20
+            "timeout": 20,
+            "retry_count": 5,
+            "retry_interval": 10
         }
 
     def get_page(self) -> List[dict]:
@@ -249,27 +291,54 @@ class TransferWebhook(_PluginBase):
         payload = {"path": mapped_path}
         logger.info(f"转移完成Webhook发送JSON：{payload}")
 
-        try:
-            ret = RequestUtils(headers=headers, timeout=self._timeout).post_res(
-                self._webhook_url,
-                json=payload
-            )
-            if ret:
-                logger.info(f"转移完成Webhook返回数据：状态码={ret.status_code}，响应={ret.text}，原因={ret.reason}")
-                logger.info(f"转移完成Webhook发送成功：{mapped_path} -> {self._webhook_url}")
-            elif ret is not None:
-                logger.error(f"转移完成Webhook返回数据：状态码={ret.status_code}，响应={ret.text}，原因={ret.reason}")
-                logger.error(f"转移完成Webhook发送失败：{mapped_path} -> {self._webhook_url}")
-            else:
+        max_attempts = self._retry_count + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                ret = RequestUtils(headers=headers, timeout=self._timeout).post_res(
+                    self._webhook_url,
+                    json=payload
+                )
+                if ret:
+                    logger.info(f"转移完成Webhook返回数据：状态码={ret.status_code}，响应={ret.text}，原因={ret.reason}")
+                    if self.__should_retry_response(ret) and attempt < max_attempts:
+                        logger.warning(
+                            f"转移完成Webhook业务结果暂不可用，{self._retry_interval}秒后重试 "
+                            f"({attempt}/{max_attempts})：{mapped_path}"
+                        )
+                        time.sleep(self._retry_interval)
+                        continue
+
+                    if self.__is_business_success(ret):
+                        logger.info(f"转移完成Webhook发送成功：{mapped_path} -> {self._webhook_url}")
+                    else:
+                        logger.error(f"转移完成Webhook业务处理失败：{mapped_path} -> {self._webhook_url}")
+                    return
+
+                if ret is not None:
+                    logger.error(f"转移完成Webhook返回数据：状态码={ret.status_code}，响应={ret.text}，原因={ret.reason}")
+                    logger.error(f"转移完成Webhook发送失败：{mapped_path} -> {self._webhook_url}")
+                    return
+
                 logger.error(f"转移完成Webhook发送失败，未获取到返回信息：{mapped_path}")
-        except Exception as e:
-            logger.error(f"转移完成Webhook发送异常：{e}")
+                return
+            except Exception as e:
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"转移完成Webhook发送异常，{self._retry_interval}秒后重试 "
+                        f"({attempt}/{max_attempts})：{e}"
+                    )
+                    time.sleep(self._retry_interval)
+                    continue
+                logger.error(f"转移完成Webhook发送异常：{e}")
+                return
 
     @staticmethod
-    def _to_int(value: Any, default: int) -> int:
+    def _to_int(value: Any, default: int, allow_zero: bool = False) -> int:
         try:
             ret = int(value)
-            return ret if ret > 0 else default
+            if ret > 0 or (allow_zero and ret == 0):
+                return ret
+            return default
         except (TypeError, ValueError):
             return default
 
@@ -344,6 +413,33 @@ class TransferWebhook(_PluginBase):
             if include_path in original_path or include_path in mapped_path:
                 return True
         return False
+
+    @staticmethod
+    def __response_json(ret) -> Dict[str, Any]:
+        try:
+            return ret.json()
+        except Exception:
+            try:
+                return json.loads(ret.text or "{}")
+            except Exception:
+                return {}
+
+    def __should_retry_response(self, ret) -> bool:
+        data = self.__response_json(ret)
+        scrape_status = str(data.get("scrapeStatus") or "").upper()
+        scrape_message = str(data.get("scrapeMessage") or "")
+        response_text = getattr(ret, "text", "") or ""
+
+        if scrape_status == "NOT_FOUND":
+            return True
+        if "未找到文件" in scrape_message or "未找到文件" in response_text:
+            return True
+        return False
+
+    def __is_business_success(self, ret) -> bool:
+        if self.__should_retry_response(ret):
+            return False
+        return 200 <= ret.status_code < 300
 
     def __parse_include_paths(self) -> List[str]:
         include_paths = []
