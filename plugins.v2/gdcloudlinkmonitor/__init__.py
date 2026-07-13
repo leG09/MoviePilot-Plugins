@@ -7,6 +7,8 @@ import threading
 import traceback
 import time
 import requests
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -38,9 +40,6 @@ from app.schemas.types import EventType, MediaType, SystemConfigKey
 from app.utils.string import StringUtils
 from app.utils.system import SystemUtils
 
-lock = threading.Lock()
-
-
 class FileMonitorHandler(FileSystemEventHandler):
     """
     目录监控响应类
@@ -68,7 +67,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.6"
+    plugin_version = "3.2.0"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -108,6 +107,12 @@ class GDCloudLinkMonitor(_PluginBase):
     _monitor_dirs = ""
     _exclude_keywords = ""
     _interval: int = 10
+    _max_workers: int = 3
+    _executor: Optional[ThreadPoolExecutor] = None
+    _processing_files = set()
+    _processing_lock = threading.Lock()
+    _media_lock = threading.Lock()
+    _state_lock = threading.RLock()
     # 存储源目录与目的目录关系
     _dirconf: Dict[str, Optional[List[Path]]] = {}
     # 存储每个源目录的轮询分发索引
@@ -210,34 +215,25 @@ class GDCloudLinkMonitor(_PluginBase):
         2. 跳过被禁用的目标目录。
         3. 忽略历史记录，严格按照配置顺序进行转移。
         """
-        all_destinations = self._dirconf.get(mon_path)
-        if not all_destinations:
-            logger.error(f"监控源 {mon_path} 未配置目标目录")
-            return None
+        with self._state_lock:
+            all_destinations = self._dirconf.get(mon_path)
+            if not all_destinations:
+                logger.error(f"监控源 {mon_path} 未配置目标目录")
+                return None
 
-        # 获取可用的目标目录（排除被禁用的）
-        available_destinations = self._get_available_destinations(mon_path)
-        if not available_destinations:
-            logger.error(f"监控源 {mon_path} 没有可用的目标目录（所有目录都已被禁用）")
-            return None
+            available_destinations = self._get_available_destinations(mon_path)
+            if not available_destinations:
+                logger.error(f"监控源 {mon_path} 没有可用的目标目录（所有目录都已被禁用）")
+                return None
 
-        # 如果只有一个可用目标目录，则直接返回
-        if len(available_destinations) == 1:
-            return available_destinations[0]
+            if len(available_destinations) == 1:
+                return available_destinations[0]
 
-        # 按照配置的目录顺序进行轮询选择，忽略历史记录
-        logger.info(f"为 '{mediainfo.title_year}' 按照配置顺序选择目标目录。")
-        
-        # 每次轮询都从第一个目录开始，除非目录被禁用
-        # 获取第一个可用的目录
-        chosen_dest = available_destinations[0]
-        
-        # 更新全局索引为选择的目录在所有目录中的位置
-        chosen_global_index = all_destinations.index(chosen_dest)
-        self._round_robin_index[mon_path] = chosen_global_index
-        
-        # 将新状态持久化到文件
-        self._save_state_to_file()
+            logger.info(f"为 '{mediainfo.title_year}' 按照配置顺序选择目标目录。")
+            chosen_dest = available_destinations[0]
+            chosen_global_index = all_destinations.index(chosen_dest)
+            self._round_robin_index[mon_path] = chosen_global_index
+            self._save_state_to_file()
 
         logger.info(f"针对 '{mon_path}' 的轮询机制选择了可用目录: {chosen_dest}")
 
@@ -433,26 +429,29 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         禁用一个目标目录
         """
-        self._disabled_destinations[destination_path] = {
-            'reason': reason,
-            'disabled_time': datetime.datetime.now(),
-            'error_count': self._disabled_destinations.get(destination_path, {}).get('error_count', 0) + 1
-        }
+        with self._state_lock:
+            self._disabled_destinations[destination_path] = {
+                'reason': reason,
+                'disabled_time': datetime.datetime.now(),
+                'error_count': self._disabled_destinations.get(destination_path, {}).get('error_count', 0) + 1
+            }
         logger.warning(f"已禁用目标目录 {destination_path}，原因：{reason}")
 
     def _enable_destination(self, destination_path: str):
         """
         重新启用一个目标目录
         """
-        if destination_path in self._disabled_destinations:
-            del self._disabled_destinations[destination_path]
-            logger.info(f"已重新启用目标目录 {destination_path}")
+        with self._state_lock:
+            if destination_path in self._disabled_destinations:
+                del self._disabled_destinations[destination_path]
+                logger.info(f"已重新启用目标目录 {destination_path}")
 
     def _is_destination_disabled(self, destination_path: str) -> bool:
         """
         检查目标目录是否被禁用
         """
-        return destination_path in self._disabled_destinations
+        with self._state_lock:
+            return destination_path in self._disabled_destinations
 
     def _get_available_destinations(self, mon_path: str) -> List[Path]:
         """
@@ -744,6 +743,9 @@ class GDCloudLinkMonitor(_PluginBase):
             logger.info("恢复检查线程已启动")
 
     def init_plugin(self, config: dict = None):
+        # 先停止旧监控与处理任务，避免重载配置时旧任务读取到新状态。
+        self.stop_service()
+
         self.transferhis = TransferHistoryOper()
         self.downloadhis = DownloadHistoryOper()
         self.transferchian = TransferChain()
@@ -775,6 +777,7 @@ class GDCloudLinkMonitor(_PluginBase):
             self._monitor_dirs = config.get("monitor_dirs") or ""
             self._exclude_keywords = config.get("exclude_keywords") or ""
             self._interval = int(config.get("interval") or 10)
+            self._max_workers = max(1, min(5, int(config.get("max_workers") or 3)))
             self._cron = config.get("cron")
             self._size = int(config.get("size") or 0)
             self._softlink = config.get("softlink")
@@ -806,10 +809,14 @@ class GDCloudLinkMonitor(_PluginBase):
             # 未识别到媒体信息时删除本地文件配置
             self._delete_local_on_unrecognized = config.get("delete_local_on_unrecognized", False)
 
-        # 停止现有任务
-        self.stop_service()
-
         if self._enabled or self._onlyonce:
+            self._processing_files = set()
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix="gdcloudlinkmonitor"
+            )
+            logger.info(f"文件处理线程池已启动，并发数：{self._max_workers}")
+
             # 定时服务管理器
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             if self._notify:
@@ -939,6 +946,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "monitor_dirs": self._monitor_dirs,
             "exclude_keywords": self._exclude_keywords,
             "interval": self._interval,
+            "max_workers": self._max_workers,
             "history": self._history,
             "softlink": self._softlink,
             "cron": self._cron,
@@ -985,6 +993,7 @@ class GDCloudLinkMonitor(_PluginBase):
         立即运行一次，全量同步目录中所有文件
         """
         logger.info("开始全量同步云盘实时监控目录 ...")
+        futures = []
         # 遍历所有监控目录
         for mon_path in self._dirconf.keys():
             logger.info(f"开始处理监控目录 {mon_path} ...")
@@ -993,7 +1002,11 @@ class GDCloudLinkMonitor(_PluginBase):
             # 遍历目录下所有文件
             for file_path in list_files:
                 logger.info(f"开始处理文件 {file_path} ...")
-                self.__handle_file(event_path=str(file_path), mon_path=mon_path)
+                future = self._submit_file(event_path=str(file_path), mon_path=mon_path)
+                if future:
+                    futures.append(future)
+        if futures:
+            wait(futures)
         logger.info("全量同步云盘实时监控目录完成！")
 
     def event_handler(self, event, mon_path: str, text: str, event_path: str):
@@ -1007,7 +1020,38 @@ class GDCloudLinkMonitor(_PluginBase):
         if not event.is_directory:
             # 文件发生变化
             logger.debug("文件%s：%s" % (text, event_path))
+            self._submit_file(event_path=event_path, mon_path=mon_path)
+
+    def _submit_file(self, event_path: str, mon_path: str) -> Optional[Future]:
+        normalized_path = str(Path(event_path).absolute())
+        with self._processing_lock:
+            if normalized_path in self._processing_files:
+                logger.debug(f"文件正在处理中，忽略重复事件：{event_path}")
+                return None
+            if not self._executor:
+                logger.warning(f"文件处理线程池未启动，跳过文件：{event_path}")
+                return None
+            self._processing_files.add(normalized_path)
+
+        try:
+            return self._executor.submit(
+                self._handle_file_task,
+                event_path,
+                mon_path,
+                normalized_path
+            )
+        except RuntimeError as e:
+            with self._processing_lock:
+                self._processing_files.discard(normalized_path)
+            logger.warning(f"提交文件处理任务失败：{event_path} - {e}")
+            return None
+
+    def _handle_file_task(self, event_path: str, mon_path: str, normalized_path: str):
+        try:
             self.__handle_file(event_path=event_path, mon_path=mon_path)
+        finally:
+            with self._processing_lock:
+                self._processing_files.discard(normalized_path)
 
     def __handle_file(self, event_path: str, mon_path: str):
         """
@@ -1019,8 +1063,8 @@ class GDCloudLinkMonitor(_PluginBase):
         try:
             if not file_path.exists():
                 return
-            # 全程加锁
-            with lock:
+            # 同一路径由任务提交层去重，不同文件允许并行处理。
+            with nullcontext():
                 pending_success_history_id = None
                 pending_success_history_path = None
                 existing_failed_transfer_history = False
@@ -1342,48 +1386,21 @@ class GDCloudLinkMonitor(_PluginBase):
 
                 if self._notify:
                     # 发送消息汇总
-                    media_list = self._medias.get(mediainfo.title_year + " " + file_meta.season) or {}
-                    if media_list:
+                    media_key = mediainfo.title_year + " " + file_meta.season
+                    with self._media_lock:
+                        media_list = self._medias.get(media_key) or {}
                         media_files = media_list.get("files") or []
-                        if media_files:
-                            file_exists = False
-                            for file in media_files:
-                                if str(file_path) == file.get("path"):
-                                    file_exists = True
-                                    break
-                            if not file_exists:
-                                media_files.append({
-                                    "path": str(file_path),
-                                    "mediainfo": mediainfo,
-                                    "file_meta": file_meta,
-                                    "transferinfo": transferinfo
-                                })
-                        else:
-                            media_files = [
-                                {
-                                    "path": str(file_path),
-                                    "mediainfo": mediainfo,
-                                    "file_meta": file_meta,
-                                    "transferinfo": transferinfo
-                                }
-                            ]
-                        media_list = {
+                        if not any(str(file_path) == item.get("path") for item in media_files):
+                            media_files.append({
+                                "path": str(file_path),
+                                "mediainfo": mediainfo,
+                                "file_meta": file_meta,
+                                "transferinfo": transferinfo
+                            })
+                        self._medias[media_key] = {
                             "files": media_files,
                             "time": datetime.datetime.now()
                         }
-                    else:
-                        media_list = {
-                            "files": [
-                                {
-                                    "path": str(file_path),
-                                    "mediainfo": mediainfo,
-                                    "file_meta": file_meta,
-                                    "transferinfo": transferinfo
-                                }
-                            ],
-                            "time": datetime.datetime.now()
-                        }
-                    self._medias[mediainfo.title_year + " " + file_meta.season] = media_list
 
                 # 广播转移完成事件，供Webhook等插件订阅；不再受“刷新媒体库”开关影响。
                 self.eventmanager.send_event(EventType.TransferComplete, {
@@ -1424,65 +1441,57 @@ class GDCloudLinkMonitor(_PluginBase):
         """
         定时检查是否有媒体处理完，发送统一消息
         """
-        if not self._medias or not self._medias.keys():
-            return
+        with self._processing_lock:
+            if self._processing_files:
+                return
 
-        # 遍历检查是否已刮削完，发送消息
-        for medis_title_year_season in list(self._medias.keys()):
-            media_list = self._medias.get(medis_title_year_season)
-            logger.info(f"开始处理媒体 {medis_title_year_season} 消息")
+        with self._media_lock:
+            media_keys = list(self._medias.keys())
+
+        for medis_title_year_season in media_keys:
+            with self._media_lock:
+                media_list = self._medias.get(medis_title_year_season)
+                if not media_list:
+                    continue
+                last_update_time = media_list.get("time")
+                media_files = media_list.get("files")
+                if not last_update_time or not media_files:
+                    continue
+                mediainfo = media_files[0].get("mediainfo")
+                if (datetime.datetime.now() - last_update_time).total_seconds() <= int(self._interval) \
+                        and mediainfo.type != MediaType.MOVIE:
+                    continue
+                media_list = self._medias.pop(medis_title_year_season, None)
 
             if not media_list:
                 continue
-
-            # 获取最后更新时间
-            last_update_time = media_list.get("time")
+            logger.info(f"开始处理媒体 {medis_title_year_season} 消息")
             media_files = media_list.get("files")
-            if not last_update_time or not media_files:
-                continue
-
             transferinfo = media_files[0].get("transferinfo")
             file_meta = media_files[0].get("file_meta")
             mediainfo = media_files[0].get("mediainfo")
-            # 判断剧集最后更新时间距现在是已超过10秒或者电影，发送消息
-            if (datetime.datetime.now() - last_update_time).total_seconds() > int(self._interval) \
-                    or mediainfo.type == MediaType.MOVIE:
-                # 发送通知
-                if self._notify:
+            if self._notify:
+                total_size = 0
+                file_count = 0
+                episodes = []
+                for file in media_files:
+                    transferinfo_item = file.get("transferinfo")
+                    total_size += transferinfo_item.total_size
+                    file_count += 1
 
-                    # 汇总处理文件总大小
-                    total_size = 0
-                    file_count = 0
+                    file_meta_item = file.get("file_meta")
+                    if file_meta_item and file_meta_item.begin_episode:
+                        episodes.append(file_meta_item.begin_episode)
 
-                    # 剧集汇总
-                    episodes = []
-                    for file in media_files:
-                        transferinfo_item = file.get("transferinfo")
-                        total_size += transferinfo_item.total_size
-                        file_count += 1
-
-                        file_meta_item = file.get("file_meta")
-                        if file_meta_item and file_meta_item.begin_episode:
-                            episodes.append(file_meta_item.begin_episode)
-
-                    transferinfo.total_size = total_size
-                    # 汇总处理文件数量
-                    transferinfo.file_count = file_count
-
-                    # 剧集季集信息 S01 E01-E04 || S01 E01、E02、E04
-                    season_episode = None
-                    # 处理文件多，说明是剧集，显示季入库消息
-                    if mediainfo.type == MediaType.TV:
-                        # 季集文本
-                        season_episode = f"{file_meta.season} {StringUtils.format_ep(episodes)}"
-                    # 发送消息
-                    self.transferchian.send_transfer_message(meta=file_meta,
-                                                             mediainfo=mediainfo,
-                                                             transferinfo=transferinfo,
-                                                             season_episode=season_episode)
-                # 发送完消息，移出key
-                del self._medias[medis_title_year_season]
-                continue
+                transferinfo.total_size = total_size
+                transferinfo.file_count = file_count
+                season_episode = None
+                if mediainfo.type == MediaType.TV:
+                    season_episode = f"{file_meta.season} {StringUtils.format_ep(episodes)}"
+                self.transferchian.send_transfer_message(meta=file_meta,
+                                                         mediainfo=mediainfo,
+                                                         transferinfo=transferinfo,
+                                                         season_episode=season_episode)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -1672,6 +1681,19 @@ class GDCloudLinkMonitor(_PluginBase):
                                     'component': 'VTextField',
                                     'props': {'model': 'interval', 'label': '入库消息延迟', 'placeholder': '10'}
                                 }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'max_workers',
+                                        'label': '文件处理并发数',
+                                        'placeholder': '3',
+                                        'hint': '建议 2-4，允许范围 1-5；并发过高可能触发网盘限流'
+                                    }
+                                }]
                             }
                         ]
                     },
@@ -1809,7 +1831,7 @@ class GDCloudLinkMonitor(_PluginBase):
         ], {
             "enabled": False, "notify": False, "onlyonce": False, "history": False, "scrape": False, "category": False,
             "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "softlink",
-            "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0,
+            "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "max_workers": 3, "cron": "", "size": 0,
             "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
             "recovery_check_interval": 1800, "mount_path_mapping": "",
             "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
@@ -1834,6 +1856,17 @@ class GDCloudLinkMonitor(_PluginBase):
                 except Exception as e:
                     print(str(e))
         self._observer = []
+
+        if self._executor:
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=True)
+            except Exception as e:
+                logger.error(f"停止文件处理线程池时出错: {e}")
+            self._executor = None
+        with self._processing_lock:
+            self._processing_files.clear()
         
         # 停止调度器
         if self._scheduler:
