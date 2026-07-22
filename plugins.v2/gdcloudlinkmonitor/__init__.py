@@ -64,11 +64,11 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件名称
     plugin_name = "多目录实时监控"
     # 插件描述
-    plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发、网盘限制检测和转移前目录刷新。"
+    plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持按量轮询分发、网盘限制检测和转移前目录刷新。"
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.7"
+    plugin_version = "3.2.1"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -112,6 +112,10 @@ class GDCloudLinkMonitor(_PluginBase):
     _dirconf: Dict[str, Optional[List[Path]]] = {}
     # 存储每个源目录的轮询分发索引
     _round_robin_index: Dict[str, int] = {}
+    # 存储每个源目录当前目标在本轮已成功转移的字节数
+    _round_robin_size: Dict[str, int] = {}
+    # 单个目标目录每轮最多转移容量（GB），0 表示按文件轮询
+    _round_robin_size_limit: float = 700
     # 状态文件路径
     _state_file: Path = None
     # 存储源目录转移方式
@@ -178,37 +182,64 @@ class GDCloudLinkMonitor(_PluginBase):
             return None
 
     def _save_state_to_file(self):
-        """将轮询状态保存到文件"""
+        """将轮询位置和容量进度保存到文件"""
         if not self._state_file:
             return
         try:
             with open(self._state_file, 'w', encoding='utf-8') as f:
-                json.dump(self._round_robin_index, f, ensure_ascii=False, indent=4)
+                json.dump({
+                    "version": 2,
+                    "round_robin_index": self._round_robin_index,
+                    "round_robin_size": self._round_robin_size
+                }, f, ensure_ascii=False, indent=4)
         except Exception as e:
             logger.error(f"无法保存轮询状态到文件 {self._state_file}: {e}")
 
     def _load_state_from_file(self):
-        """从文件加载轮询状态"""
+        """从文件加载轮询位置和容量进度，兼容旧版索引格式"""
         if not self._state_file or not self._state_file.exists():
             return {}
         try:
             with open(self._state_file, 'r', encoding='utf-8') as f:
                 state = json.load(f)
-                # 确保加载的状态是正确的字典格式
-                if isinstance(state, dict):
-                    logger.info(f"成功从 {self._state_file} 加载轮询状态。")
-                    return state
+            if not isinstance(state, dict):
                 return {}
+
+            indexes = state.get("round_robin_index")
+            if isinstance(indexes, dict):
+                sizes = state.get("round_robin_size")
+                if isinstance(sizes, dict):
+                    self._round_robin_size = {
+                        str(mon_path): int(size)
+                        for mon_path, size in sizes.items()
+                        if isinstance(size, (int, float)) and size >= 0
+                    }
+                logger.info(f"成功从 {self._state_file} 加载轮询位置和容量进度。")
+                return {
+                    str(mon_path): index
+                    for mon_path, index in indexes.items()
+                    if isinstance(index, int)
+                }
+
+            # 旧版状态文件直接保存 {监控目录: 索引}。
+            logger.info(f"成功从 {self._state_file} 加载旧版轮询状态。")
+            return {
+                str(mon_path): index
+                for mon_path, index in state.items()
+                if isinstance(index, int)
+            }
         except (json.JSONDecodeError, Exception) as e:
             logger.error(f"无法从 {self._state_file} 加载轮询状态: {e}")
             return {}
 
-    def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
+    def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo,
+                                     file_size: int = 0) -> Optional[Path]:
         """
-        根据配置的目录顺序选择一个目标目录。
-        1. 按照配置的目录顺序进行轮询选择。
-        2. 跳过被禁用的目标目录。
-        3. 持久化上次选择的位置，插件重启后继续轮询。
+        根据配置的目录顺序和单轮容量选择目标目录。
+        1. 配置容量上限时，当前目录达到上限后再切换到下一个目录。
+        2. 未配置容量上限时，保持每个文件切换一次的轮询方式。
+        3. 跳过被禁用的目标目录。
+        4. 持久化轮询位置和容量进度，插件重启后继续处理。
         """
         all_destinations = self._dirconf.get(mon_path)
         if not all_destinations:
@@ -221,38 +252,89 @@ class GDCloudLinkMonitor(_PluginBase):
             logger.error(f"监控源 {mon_path} 没有可用的目标目录（所有目录都已被禁用）")
             return None
 
-        # 状态中保存的是上次选中的全局索引；配置发生变化或状态异常时从头开始。
+        # 状态中保存的是当前（或上次）选中的全局索引。
         last_index = self._round_robin_index.get(mon_path, -1)
         if not isinstance(last_index, int) or not 0 <= last_index < len(all_destinations):
             last_index = -1
 
-        # 从上次位置的下一个目录开始，按配置顺序寻找可用目标。
         available_destination_set = set(available_destinations)
         chosen_dest = None
         chosen_global_index = None
-        for offset in range(1, len(all_destinations) + 1):
-            candidate_index = (last_index + offset) % len(all_destinations)
-            candidate = all_destinations[candidate_index]
-            if candidate in available_destination_set:
-                chosen_dest = candidate
-                chosen_global_index = candidate_index
-                break
+        size_limit_bytes = int(self._round_robin_size_limit * 1024 ** 3)
+        current_size = max(0, int(self._round_robin_size.get(mon_path, 0)))
+        file_size = max(0, int(file_size or 0))
+
+        if size_limit_bytes > 0:
+            # 当前目录仍可容纳本文件时继续使用；单文件超过上限时允许完整转移。
+            if last_index >= 0 and all_destinations[last_index] in available_destination_set \
+                    and current_size < size_limit_bytes \
+                    and (current_size == 0 or current_size + file_size <= size_limit_bytes):
+                chosen_global_index = last_index
+                chosen_dest = all_destinations[last_index]
+            else:
+                # 当前目录达到容量上限或被禁用，从下一个可用目录开启新一轮容量计数。
+                start_index = 0 if last_index < 0 else (last_index + 1) % len(all_destinations)
+                for offset in range(len(all_destinations)):
+                    candidate_index = (start_index + offset) % len(all_destinations)
+                    candidate = all_destinations[candidate_index]
+                    if candidate in available_destination_set:
+                        chosen_dest = candidate
+                        chosen_global_index = candidate_index
+                        current_size = 0
+                        break
+        else:
+            # 未设置容量上限时，按文件依次轮询，兼容原有行为。
+            for offset in range(1, len(all_destinations) + 1):
+                candidate_index = (last_index + offset) % len(all_destinations)
+                candidate = all_destinations[candidate_index]
+                if candidate in available_destination_set:
+                    chosen_dest = candidate
+                    chosen_global_index = candidate_index
+                    current_size = 0
+                    break
 
         if chosen_dest is None:
             logger.error(f"监控源 {mon_path} 无法选出可用的目标目录")
             return None
 
         self._round_robin_index[mon_path] = chosen_global_index
-        
-        # 将新状态持久化到文件
+        self._round_robin_size[mon_path] = current_size
         self._save_state_to_file()
 
-        logger.info(
-            f"为 '{mediainfo.title_year}' 轮询选择目标目录 "
-            f"[{chosen_global_index + 1}/{len(all_destinations)}]: {chosen_dest}"
-        )
+        if size_limit_bytes > 0:
+            logger.info(
+                f"为 '{mediainfo.title_year}' 按量选择目标目录 "
+                f"[{chosen_global_index + 1}/{len(all_destinations)}]: {chosen_dest}，"
+                f"本轮已转移 {current_size / 1024 ** 3:.2f}/{self._round_robin_size_limit:g} GB，"
+                f"当前文件 {file_size / 1024 ** 3:.2f} GB"
+            )
+        else:
+            logger.info(
+                f"为 '{mediainfo.title_year}' 轮询选择目标目录 "
+                f"[{chosen_global_index + 1}/{len(all_destinations)}]: {chosen_dest}"
+            )
 
         return chosen_dest
+
+    def _record_round_robin_transfer(self, mon_path: str, target: Path, transferred_size: int):
+        """转移成功后记录当前目标目录本轮累计容量"""
+        if self._round_robin_size_limit <= 0 or transferred_size <= 0:
+            return
+
+        all_destinations = self._dirconf.get(mon_path) or []
+        current_index = self._round_robin_index.get(mon_path, -1)
+        if not 0 <= current_index < len(all_destinations) or all_destinations[current_index] != target:
+            logger.warning(f"目标目录 {target} 与当前容量轮询状态不一致，跳过容量累计")
+            return
+
+        current_size = max(0, int(self._round_robin_size.get(mon_path, 0)))
+        current_size += int(transferred_size)
+        self._round_robin_size[mon_path] = current_size
+        self._save_state_to_file()
+        logger.info(
+            f"目标目录 {target} 本轮累计已转移 "
+            f"{current_size / 1024 ** 3:.2f}/{self._round_robin_size_limit:g} GB"
+        )
 
     def _parse_mount_path_mapping(self) -> Dict[str, str]:
         """
@@ -770,6 +852,7 @@ class GDCloudLinkMonitor(_PluginBase):
         self._dirconf = {}
         self._transferconf = {}
         self._overwrite_mode = {}
+        self._round_robin_size = {}
         self._round_robin_index = self._load_state_from_file()
 
         # 读取配置
@@ -788,6 +871,10 @@ class GDCloudLinkMonitor(_PluginBase):
             self._interval = int(config.get("interval") or 10)
             self._cron = config.get("cron")
             self._size = int(config.get("size") or 0)
+            round_robin_size_limit = config.get("round_robin_size_limit", 700)
+            if round_robin_size_limit in (None, ""):
+                round_robin_size_limit = 700
+            self._round_robin_size_limit = max(0, float(round_robin_size_limit))
             self._softlink = config.get("softlink")
             self._strm = config.get("strm")
             
@@ -957,6 +1044,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "scrape": self._scrape,
             "category": self._category,
             "size": self._size,
+            "round_robin_size_limit": self._round_robin_size_limit,
             "refresh": self._refresh,
             "log_monitor_enabled": self._log_monitor_enabled,
             "log_path": self._log_path,
@@ -1181,7 +1269,14 @@ class GDCloudLinkMonitor(_PluginBase):
                         logger.error(f"删除成功转移记录失败：{e}")
                 
                 # 使用新的轮询逻辑查询转移目的目录
-                target: Path = self._get_round_robin_destination(mon_path=mon_path, mediainfo=mediainfo)
+                source_file_size = getattr(file_item, 'size', 0) or (
+                    file_path.stat().st_size if file_path.exists() else 0
+                )
+                target: Path = self._get_round_robin_destination(
+                    mon_path=mon_path,
+                    mediainfo=mediainfo,
+                    file_size=source_file_size
+                )
                 if not target:
                     logger.error(f"无法为 '{file_path.name}' 确定目标目录，已跳过。")
                     return
@@ -1334,6 +1429,14 @@ class GDCloudLinkMonitor(_PluginBase):
                             image=mediainfo.get_message_image()
                         )
                     return
+
+                # 仅在转移成功后累计容量；失败任务不会占用当前目录的容量额度。
+                transferred_size = getattr(transferinfo, 'total_size', 0) or source_file_size
+                self._record_round_robin_transfer(
+                    mon_path=mon_path,
+                    target=target,
+                    transferred_size=transferred_size
+                )
 
                 if self._history:
                     # 新增转移成功历史记录
@@ -1549,7 +1652,7 @@ class GDCloudLinkMonitor(_PluginBase):
         placeholder_text = (
             '每一行一个监控配置，支持以下格式：\n'
             '1. 单目标目录：监控目录:转移目的目录\n'
-            '2. 多目标轮询：监控目录:目的1,目的2,目的3（按顺序依次上传）\n'
+            '2. 多目标按量轮询：监控目录:目的1,目的2,目的3（达到单轮容量后切换）\n'
             '3. 自定义转移方式：监控目录:转移目的目录#转移方式\n'
             '支持的转移方式: move, copy, link, softlink, rclone_copy, rclone_move'
         )
@@ -1688,13 +1791,29 @@ class GDCloudLinkMonitor(_PluginBase):
                     },
                     {
                         'component': 'VRow',
-                        'content': [{
-                            'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                            'content': [{
-                                'component': 'VTextField',
-                                'props': {'model': 'cron', 'label': '定时任务', 'placeholder': '留空则不执行定时同步'}
-                            }]
-                        }]
+                        'content': [
+                            {
+                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'cron', 'label': '定时任务', 'placeholder': '留空则不执行定时同步'}
+                                }]
+                            },
+                            {
+                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'round_robin_size_limit',
+                                        'label': '单目录单轮转移上限(GB)',
+                                        'placeholder': '默认 700，0 表示按文件轮询',
+                                        'hint': '达到上限后切换到下一个目标目录；单个超大文件不会被拆分',
+                                        'type': 'number',
+                                        'min': 0
+                                    }
+                                }]
+                            }
+                        ]
                     },
                     {
                         'component': 'VRow',
@@ -1821,6 +1940,7 @@ class GDCloudLinkMonitor(_PluginBase):
             "enabled": False, "notify": False, "onlyonce": False, "history": False, "scrape": False, "category": False,
             "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "softlink",
             "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0,
+            "round_robin_size_limit": 700,
             "log_monitor_enabled": False, "log_path": "", "log_check_interval": 60, "error_threshold": 3, 
             "recovery_check_interval": 1800, "mount_path_mapping": "",
             "refresh_before_transfer": False, "refresh_api_url": "", "refresh_api_key": "",
