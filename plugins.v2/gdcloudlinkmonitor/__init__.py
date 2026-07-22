@@ -68,7 +68,7 @@ class GDCloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "3.1.6"
+    plugin_version = "3.1.7"
     # 插件作者
     plugin_author = "leGO9"
     # 作者主页
@@ -208,7 +208,7 @@ class GDCloudLinkMonitor(_PluginBase):
         根据配置的目录顺序选择一个目标目录。
         1. 按照配置的目录顺序进行轮询选择。
         2. 跳过被禁用的目标目录。
-        3. 忽略历史记录，严格按照配置顺序进行转移。
+        3. 持久化上次选择的位置，插件重启后继续轮询。
         """
         all_destinations = self._dirconf.get(mon_path)
         if not all_destinations:
@@ -221,25 +221,36 @@ class GDCloudLinkMonitor(_PluginBase):
             logger.error(f"监控源 {mon_path} 没有可用的目标目录（所有目录都已被禁用）")
             return None
 
-        # 如果只有一个可用目标目录，则直接返回
-        if len(available_destinations) == 1:
-            return available_destinations[0]
+        # 状态中保存的是上次选中的全局索引；配置发生变化或状态异常时从头开始。
+        last_index = self._round_robin_index.get(mon_path, -1)
+        if not isinstance(last_index, int) or not 0 <= last_index < len(all_destinations):
+            last_index = -1
 
-        # 按照配置的目录顺序进行轮询选择，忽略历史记录
-        logger.info(f"为 '{mediainfo.title_year}' 按照配置顺序选择目标目录。")
-        
-        # 每次轮询都从第一个目录开始，除非目录被禁用
-        # 获取第一个可用的目录
-        chosen_dest = available_destinations[0]
-        
-        # 更新全局索引为选择的目录在所有目录中的位置
-        chosen_global_index = all_destinations.index(chosen_dest)
+        # 从上次位置的下一个目录开始，按配置顺序寻找可用目标。
+        available_destination_set = set(available_destinations)
+        chosen_dest = None
+        chosen_global_index = None
+        for offset in range(1, len(all_destinations) + 1):
+            candidate_index = (last_index + offset) % len(all_destinations)
+            candidate = all_destinations[candidate_index]
+            if candidate in available_destination_set:
+                chosen_dest = candidate
+                chosen_global_index = candidate_index
+                break
+
+        if chosen_dest is None:
+            logger.error(f"监控源 {mon_path} 无法选出可用的目标目录")
+            return None
+
         self._round_robin_index[mon_path] = chosen_global_index
         
         # 将新状态持久化到文件
         self._save_state_to_file()
 
-        logger.info(f"针对 '{mon_path}' 的轮询机制选择了可用目录: {chosen_dest}")
+        logger.info(
+            f"为 '{mediainfo.title_year}' 轮询选择目标目录 "
+            f"[{chosen_global_index + 1}/{len(all_destinations)}]: {chosen_dest}"
+        )
 
         return chosen_dest
 
@@ -1538,7 +1549,7 @@ class GDCloudLinkMonitor(_PluginBase):
         placeholder_text = (
             '每一行一个监控配置，支持以下格式：\n'
             '1. 单目标目录：监控目录:转移目的目录\n'
-            '2. 多目标轮询：监控目录:目的1,目的2,目的3\n'
+            '2. 多目标轮询：监控目录:目的1,目的2,目的3（按顺序依次上传）\n'
             '3. 自定义转移方式：监控目录:转移目的目录#转移方式\n'
             '支持的转移方式: move, copy, link, softlink, rclone_copy, rclone_move'
         )
