@@ -1223,18 +1223,22 @@ class GDCloudLinkMonitor(_PluginBase):
                             logger.debug(f"父目录名识别跳过：{file_path}")
 
                 if not mediainfo:
+                    # 无论是否删除本地文件，都先保留一条失败历史，便于查看原因和手动重识别。
+                    # 已有失败记录时直接复用，避免同一文件重复创建历史记录。
+                    if existing_failed_transfer_history:
+                        his = transfer_history
+                        logger.info(f"未识别到媒体信息，保留已有失败转移记录：{file_path}")
+                    else:
+                        his = self.transferhis.add_fail(
+                            fileitem=file_item,
+                            mode=self._transferconf.get(mon_path),
+                            meta=file_meta
+                        )
+                        logger.info(f"未识别到媒体信息，已写入失败转移记录：{file_path}")
+
                     if not self._delete_local_on_unrecognized:
-                        if existing_failed_transfer_history:
-                            logger.info(f"未识别到媒体信息且删除开关关闭，保留已有失败转移记录并跳过处理：{file_path}")
-                        else:
-                            logger.info(f"未识别到媒体信息且删除开关关闭，跳过处理：{file_path}")
+                        logger.info(f"未识别到媒体信息且删除开关关闭，跳过处理：{file_path}")
                         return
-                    # 新增转移失败历史记录
-                    his = self.transferhis.add_fail(
-                        fileitem=file_item,
-                        mode=self._transferconf.get(mon_path),
-                        meta=file_meta
-                    )
                     if self._notify:
                         self.post_message(
                             mtype=NotificationType.Manual,
