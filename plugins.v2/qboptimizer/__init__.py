@@ -34,7 +34,7 @@ class QbOptimizer(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.9"
+    plugin_version = "2.0"
     # 插件作者
     plugin_author = "leG09"
     # 作者主页
@@ -60,6 +60,9 @@ class QbOptimizer(_PluginBase):
     _enable_timeout_clean = False    # 启用慢速下载任务清理
     _enable_unrecognized_clean = False  # 启用识别不到媒体信息任务清理
     _enable_auto_redownload = True   # 启用自动重新下载
+    _exclude_keywords = ""
+    _exclude_categories = ""
+    _exclude_labels = ""
     
     # 配置参数
     _zero_seed_threshold = 0         # 做种数阈值
@@ -115,6 +118,9 @@ class QbOptimizer(_PluginBase):
             self._enable_unrecognized_clean = config.get("enable_unrecognized_clean", False)
             self._enable_auto_redownload = config.get("enable_auto_redownload", True)
             self._search_sites = config.get("search_sites") or []
+            self._exclude_keywords = config.get("exclude_keywords") or ""
+            self._exclude_categories = config.get("exclude_categories") or ""
+            self._exclude_labels = config.get("exclude_labels") or ""
             self._seeder_metric = 'num_complete'  # 固定使用num_complete字段
             
             # 配置参数
@@ -214,6 +220,9 @@ class QbOptimizer(_PluginBase):
                     "enable_unrecognized_clean": self._enable_unrecognized_clean,
                     "enable_auto_redownload": self._enable_auto_redownload,
                     "search_sites": self._search_sites,
+                    "exclude_keywords": self._exclude_keywords,
+                    "exclude_categories": self._exclude_categories,
+                    "exclude_labels": self._exclude_labels,
                     "zero_seed_threshold": self._zero_seed_threshold,
 
                     "timeout_hours": self._timeout_hours,
@@ -616,10 +625,12 @@ class QbOptimizer(_PluginBase):
                     
                     # 执行各项优化
                     logger.info(f"【QB种子优化】开始执行优化操作...")
-                    zero_seed_removed, zero_seed_failed = self._clean_zero_seed_torrents(downloader_obj, all_torrents, downloader_name)
+                    cleanable_torrents = [t for t in all_torrents if not self._is_excluded_torrent(t)]
+                    logger.info(f"【QB种子优化】过滤保护种子: {len(all_torrents) - len(cleanable_torrents)}个")
+                    zero_seed_removed, zero_seed_failed = self._clean_zero_seed_torrents(downloader_obj, cleanable_torrents, downloader_name)
                     priority_boosted = self._boost_priority_torrents(downloader_obj, all_torrents, downloader_name)
-                    timeout_removed, timeout_failed = self._clean_timeout_torrents(downloader_obj, all_torrents, downloader_name)
-                    unrecognized_removed = self._clean_unrecognized_torrents(downloader_obj, all_torrents, downloader_name)
+                    timeout_removed, timeout_failed = self._clean_timeout_torrents(downloader_obj, cleanable_torrents, downloader_name)
+                    unrecognized_removed = self._clean_unrecognized_torrents(downloader_obj, cleanable_torrents, downloader_name)
                     
                     # 执行磁盘空间和I/O监控
                     disk_monitor_result = self._monitor_disk_and_io(downloader_obj, downloader_name)
@@ -698,6 +709,19 @@ class QbOptimizer(_PluginBase):
                     logger.info(f"【QB种子优化】清理{total_zero_seed_removed + total_timeout_removed + total_unrecognized_removed}个种子，全部重新下载成功，无需发送通知")
         else:
             logger.info(f"【QB种子优化】本次无清理操作，无需发送通知")
+
+    def _is_excluded_torrent(self, torrent) -> bool:
+        """检查清理保护规则；配置每行一项。"""
+        keywords = [item.strip().casefold() for item in self._exclude_keywords.splitlines() if item.strip()]
+        categories = {item.strip().casefold() for item in self._exclude_categories.splitlines() if item.strip()}
+        labels = {item.strip().casefold() for item in self._exclude_labels.splitlines() if item.strip()}
+        name = str(getattr(torrent, "name", "") or "").casefold()
+        category = str(getattr(torrent, "category", "") or "").strip().casefold()
+        tags = str(getattr(torrent, "tags", "") or "")
+        torrent_labels = {tag.strip().casefold() for tag in tags.split(",") if tag.strip()}
+        return (any(keyword in name for keyword in keywords)
+                or category in categories
+                or bool(torrent_labels & labels))
 
     def _clean_zero_seed_torrents(self, downloader_obj, torrents, downloader_name):
         """
@@ -2801,6 +2825,24 @@ class QbOptimizer(_PluginBase):
             {
                 'component': 'VForm',
                 'content': [
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12},
+                             'content': [{'component': 'VDivider', 'props': {'text': '过滤设置：匹配的种子不会被清理'}}]},
+                            *[
+                                {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                 'content': [{'component': 'VTextarea', 'props': {
+                                     'model': model, 'label': label, 'rows': 3,
+                                     'placeholder': placeholder}}]}
+                                for model, label, placeholder in (
+                                    ('exclude_keywords', '🔤 排除关键字', '种子名称包含关键字时跳过，每行一个'),
+                                    ('exclude_categories', '📂 排除分类', '分类名称，每行一个'),
+                                    ('exclude_labels', '🏷️ 排除标签', '标签名称，每行一个'),
+                                )
+                            ],
+                        ],
+                    },
                     # 基础配置组
                     {
                         'component': 'VRow',
@@ -3628,6 +3670,9 @@ class QbOptimizer(_PluginBase):
             "cron": "0 */6 * * *",
             "downloaders": [],
             "search_sites": [],
+            "exclude_keywords": "",
+            "exclude_categories": "",
+            "exclude_labels": "",
             "enable_zero_seed_clean": True,
             "enable_priority_boost": True,
             "enable_timeout_clean": True,
